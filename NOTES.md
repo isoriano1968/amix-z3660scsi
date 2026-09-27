@@ -1086,3 +1086,56 @@ more trips (the old DRVTYPE probe was 2). On the emulator's `sptalloc` arm the e
 **Open.** A bench cell on a non-Z3660 AGA rig (D45) and the metal re-check of the direct arm are
 owed; neither was run here. The fork firmware prints nothing for these accesses; stock is read
 from source only.
+
+## 2026-09-27: T-9 rebuild — spl masks and MMIO `volatile` restored in the objects
+
+**Cause (workspace `review/T-9`).** `AMIX_KERNEL_CFLAGS` carries `-traditional`, which turns off
+`__STDC__`, so the stock `sys/types.h` did `#define volatile` (empty). The GNU spl primitives in
+`sys/inline.h` then became plain output asms, and gcc deleted every one whose result was unused.
+In `z3660_040.o`/`z3660_030.o` only the `spl6()` in `z3660_enter()` survived (its value escapes):
+`z3660_leave()` never restored the IPL, and the whole `z3660_complete()` FIFO / `completing` guard
+ran unmasked. The source was right; the objects were not.
+
+**Fix.** Toolchain only: gcc-cross-amix `7a1d727` adds `-Dvolatile=__volatile__
+-Dconst=__const__` to `AMIX_KERNEL_CFLAGS` (`build/env.sh` sha256 `d3ecbc50…`). No driver change.
+G1 on the relink TU (`gcc $CF -dM -E z3660_040.c`): `#define volatile __volatile__`, no empty
+define.
+
+**Rebuild** (`build/mkobj.sh`, driver-line port `bd36a02`, source `03722f6`):
+
+| object | before (sha256 / sum -r / bytes) | after |
+|---|---|---|
+| `z3660_040.o` | `55e37689…` / 32577 9 / 8708 | `c661caa8…` / 52512 9 / 8740 |
+| `z3660_030.o` | `0831fd2f…` / 11289 9 / 8704 | `24b3ecfe…` / 32792 9 / 8736 |
+
+`obj-base` and `obj-a1` (sources `70f54b6`, `f1599e6`) rebuild to the same pair as each other
+(`1028c0e3…` / `687bfc08…`), as before the flag. Relink TOTAL complaints 0; `nm -u` still exactly
+`autocon bcopy printf sptalloc`; symbol table names and types identical old vs new (74 entries);
+scan060 CLEAN on both (1042 / 1021 decoded lines).
+
+**Per-function `%sr` (G2), both objects:**
+
+| function | spl sites in source | SR reads / writes before | after |
+|---|---|---|---|
+| `z3660_enter` | 1 (`spl6`) | 1 / 1 | 1 / 1 |
+| `z3660_leave` | 1 (`splx`) | 0 / 0 | 1 / 1 |
+| `z3660_complete` | 6 (`spl6`, 3 × exit `splx`, loop `splx` + `spl6`) | 0 / 0 | 4 / 4 |
+
+`z3660_complete` has 4 SR writes for 6 sites because gcc merges the three `splx(s); return` exits
+into one tail (`0x92e`); the entry `spl6`, the in-loop `splx`/`spl6` pair around `z3660done()`,
+and that shared exit are all present. A per-function gate, not a count gate, is what holds.
+
+**MMIO widths.** The whole-object diff (addresses normalised) is exactly the spl sites plus one
+access: the `RDVPOSR()` machine gate in `z3660map()` was a byte read (`moveb $DFF004; andiw #127`)
+and is now the declared word read (`movew; bfextu`). Every `RDLONG()`/`WRLONG()` was already
+`movel` before the fix (the value is consumed, so gcc could not narrow it), including all of
+`z3660_sig()`, `z3660map()` and the mailbox path. The driver has no MMIO poll loop (the mailbox is
+synchronous), so nothing could be hoisted.
+
+**Host harness.** The `HOST_TEST` stub `test/host/stubs/sys/inline.h` still matches the real
+header's meaning: `spl6` = `_spl4` (`mov.w &0x2400,%sr`, returns the prior SR as the token),
+`splx` restores that token. The mock models the IPL, not the SR word, which is all the re-entry
+cells observe. `make -C test/host check`: 155 passed, 0 failed; 6/6 parity.
+
+**Pin.** kerntools re-pins the z3660 object from `55e37689…` to the new sha256; DL-00/DL-08/DL-13,
+MD-3a and MG1–MG3 have to be re-run on it (T-9 item 4). Not run here.
