@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-27 — ZS-02 detection hardening; doc corrections (f1599e6, 01c8d88, 03722f6)
+
+ConfigDev first (autocon 0x144B0001); the fixed base 0x10000000 is probed only when autocon misses and
+VPOSR shows AGA; a mailbox signature the open bus cannot fake (READ_ADDR2/WRITE_ADDR2 keys read back in
+order, DRVNUM following DRVNUMX through two values, DRVTYPE <= 1); an AutoConfig board with a silent
+mailbox attaches with its unit sweep deferred (no phantom "no drive mapped" lines). Host harness 155/0,
+6/6 parity; driver-line object 55e37689 scan060 CLEAN. Docs: completions are synchronous through the
+driver FIFO (not timeout()); amiberry does model a 040/060 copyback cache (AB-03), the coherence verdict
+stays metal-only; the sptalloc arm's mapping is CM=00 writethrough-cacheable; the autocon table is
+unreliable only on the stock 030 boot2 (T-7); README status.
+
 ## 2026-09-26 — stock-firmware hardening: units with a bad block size are skipped (70f54b6)
 
 z3660_geom_fill() reads BLOCKSIZE first and skips a unit whose block size is not a power of two in
