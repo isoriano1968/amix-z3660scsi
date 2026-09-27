@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — T-9 rebuild: spl masks and MMIO volatile restored; truthful console (18e7eb2, 16ca1a8)
+
+With gcc-cross-amix 7a1d727 the objects keep their spl masks again: z3660_leave restores the IPL and
+z3660_complete's FIFO/`completing` guard is masked (4 SR writes, was 0); the VPOSR gate is a word read
+again. No driver source change was needed for that. A1: a unit skipped at attach that answers later
+drops its skip bit and is named once ("drive answering now"); the cache-inhibit FAILED line says
+"not enforced, continuing" or "attach refused"; a failed board mapping prints once. Host harness
+161/0 (was 155/0), 6/6 parity. Pins: z3660_040.o 6c347e25… (sum -r 10405), z3660_030.o ca2ef1cb….
+
 ## 2026-09-27 — ZS-02 detection hardening; doc corrections (f1599e6, 01c8d88, 03722f6)
 
 ConfigDev first (autocon 0x144B0001); the fixed base 0x10000000 is probed only when autocon misses and
