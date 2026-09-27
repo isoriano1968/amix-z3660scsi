@@ -1015,3 +1015,56 @@ still attached (AutoConfig already proved it is a Z3660), but the sweep is defer
 says so; the per-unit skip lines appear only once the signature answers. That is a code change,
 so it lands with ZS-02 (next section), not in the comment-only correction commit, whose object is
 byte-identical by requirement.
+
+## 2026-09-27: ZS-02 — detection a non-Z3660 AGA machine cannot fool
+
+**The hole (P6.2, D-1 D45).** Before this, the fixed-base probe accepted any window where
+`P_DRVTYPE` read 0 or 1. An AGA machine with no Z3660 and an open bus at `0x10000000` reads 0
+there, so a z3660scsi-carrying kernel would claim a board, sweep eight phantom units and hand
+`sd` a card. D45 makes closing it a precondition for one auto-detecting kernel per CPU line.
+
+**Decision order** (`z3660map()`):
+
+1. **ConfigDev first.** `autocon(0x144B0001)`: the board's own AutoConfig entry. This is the
+   metal-proven path on the 040/060 line (boot2-040 hands the entry over, `review/T-7`), where the
+   glue registers the card only through `sd.c`'s autocon loop. AutoConfig has already proved a
+   Z3660 is present, so a mailbox that does not answer the signature *yet* does not un-find it:
+   the board attaches, the unit sweep is deferred with one console line, and every later command
+   re-tries the signature before it trusts any geometry (`z3660_geom_get()`). The first command
+   after it answers runs the sweep. No re-mapping happens on the way, so no `sptmap` leak.
+2. **Fixed base only when autocon() finds nothing AND the machine gate passes** (VPOSR bits 8-14
+   ≥ 0x22, AGA). ECS/OCS never touches the window (zero mailbox accesses; harness-gated). Here the
+   signature is the *only* evidence of a Z3660, so no signature means ENXIO, the window is
+   dropped, and one line says `z3660: no piscsi mailbox at 0x10000000`.
+
+**The signature** (`z3660_sig(leave)`). The piscsi protocol has **no version or magic register**:
+`z3660_scsi_enums.h` (fork and stock) is a block-level command set, and the boot ROM window at
+`+0x4000` depends on the SD card's `z3660_scsi.rom`. So the signature uses registers every
+firmware has — fork `scsi.c` `handle_piscsi_reg_write()`/`handle_piscsi_read()`, stock
+`upstream main` the same functions, and amiberry's `z3660_scsi.cpp`:
+
+| step | register (offset) | written | must read | defeats |
+|---|---|---|---|---|
+| 1 | `P_READ_ADDR2` (0x24) | K1 `0xA55A3CC3` | K1 | all-zero, all-ones, address echo |
+| 2 | `P_WRITE_ADDR2` (0x244) | K2 `0x3CC3A55A` | K2 | same; 0x24 is read *after* 0x244 was written, so a bus holding the last driven value returns K2 at step 1 |
+| 3 | `P_DRVNUMX` (0x90) → `P_DRVNUM` (0x08) | `leave^1` | `leave^1` | RAM: 0x08 is never written, so plain memory cannot follow |
+| 4 | `P_DRVNUMX` (0x90) → `P_DRVNUM` (0x08) | `leave` | `leave` | RAM holding a lucky value (two different values) |
+| 5 | `P_DRVTYPE` (0x0C) | — | 0 or 1 | the pre-ZS-02 floor, kept |
+
+Why each open-bus pattern fails: 0x00000000 and 0xFFFFFFFF are neither key; an address echo
+returns `0x10002024`/`0x10002244` (or their low words), which is neither key in either half; a
+data latch returns K2 where K1 is due; RAM stores K1/K2 but cannot make `P_DRVNUM` follow
+`P_DRVNUMX`; ROM or any fixed content fails the write-back. Both ADDR2 cells are length
+registers every transfer rewrites before its doorbell, and every command re-selects its unit, so
+the probe leaves nothing behind; `leave` is 6 at attach (the unit the old probe selected) and the
+command's own unit on a deferred re-try. The values read are kmem-readable in `z3660_sig_rd[5]`,
+with `z3660_sig_ok`, `z3660_sig_fails` and `z3660_sig_deferred`. Cost: 9 mailbox trips, once.
+
+**What changes on metal.** Nothing visible on the direct arm: the signature answers at attach, the
+sweep runs as before, and the console is the same (only the unmapped units named). Attach costs 7
+more trips (the old DRVTYPE probe was 2). On the emulator's `sptalloc` arm the eight false
+`no drive mapped` lines become one `unit sweep deferred` line (previous section).
+
+**Open.** A bench cell on a non-Z3660 AGA rig (D45) and the metal re-check of the direct arm are
+owed; neither was run here. The fork firmware prints nothing for these accesses; stock is read
+from source only.
