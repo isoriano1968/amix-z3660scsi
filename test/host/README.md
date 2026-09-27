@@ -12,7 +12,7 @@ make -C test/host clean
 
 ## What it exercises
 
-Current run: **95 gating assertions passed, 0 failed**, plus 6/6 stretch parity
+Current run: **155 gating assertions passed, 0 failed**, plus 6/6 stretch parity
 against the firmware's CD oracle.
 
 `z3660queue()` is driven with a hand-built `struct sdcom` and completes
@@ -38,6 +38,12 @@ Gating (mount-critical, gate the exit code):
   behavior **frozen** as the current driver emits it (the real box boots on
   this path; the oracle's disk strings do *not* apply here).
 - TEST UNIT READY GOOD for both.
+- **ZS-02 detection** (`test_zs02_detection()`, run last): an absent board on an
+  all-zero, all-ones, address-echo, last-value-latch or RAM bus is refused with
+  nothing swept, named or rung; the real signature attaches at the fixed base;
+  ECS never touches the window; a ConfigDev board whose mailbox is silent at
+  attach is attached with the sweep deferred and names no phantom units until
+  the mailbox answers (`NOTES.md` 2026-09-27).
 - Board mapping: `z3660map()` takes the **direct** (section-0 identity) arm and
   calls no `sptalloc()` — see below.
 - **Per-CDB round-trip budget** — see below.

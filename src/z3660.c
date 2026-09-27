@@ -18,7 +18,9 @@
  * review/T-7).  So detection
  * is multi-method, like the Hydra driver: try autocon() first, then -- only on
  * an AGA machine (VPOSR >= 0x22; the ECS build box must never touch it) -- probe
- * the fixed base directly and verify the mailbox answers (DRVTYPE reads 0/1).
+ * the fixed base directly.  Either way the mailbox must answer a signature the
+ * open bus cannot fake (ZS-02, see z3660_sig()) before a single unit is trusted;
+ * on the fixed base no signature means no board.
  *
  * BOTH windows this driver maps are BOARD apertures, not kernel RAM -- including
  * the "bounce buffer", which is the FIRMWARE's own staging area seen through the
@@ -116,10 +118,11 @@
 /* piscsi command-register offsets (added to the register-window base) */
 #define	P_WRITE		0x00		/* trigger block WRITE  (value = unit) */
 #define	P_READ		0x04		/* trigger block READ   (value = unit) */
+#define	P_DRVNUM	0x08		/* read: the selected unit (piscsi_cur_drive) */
 #define	P_DRVTYPE	0x0C
 #define	P_BLOCKS	0x10
 #define	P_READ_ADDR1	0x20		/* block number  */
-#define	P_READ_ADDR2	0x24		/* byte length   */
+#define	P_READ_ADDR2	0x24		/* byte length   (also signature cell 1) */
 #define	P_READ_ADDR3	0x28		/* buffer address */
 #define	P_DRVNUMX	0x90		/* select unit for subsequent ops */
 #define	P_USED_DMA	0x9C		/* read after READ: !=0 => data is in bounce */
@@ -131,7 +134,7 @@
  */
 #define	P_PDT		0xA0
 #define	P_WRITE_ADDR1	0x240
-#define	P_WRITE_ADDR2	0x244
+#define	P_WRITE_ADDR2	0x244		/* byte length   (also signature cell 2) */
 #define	P_WRITE_ADDR3	0x248
 #define	P_BLOCKSIZE0	0x200		/* + unit*4, units 0..7 */
 #define	P_BLOCKS0	0x220		/* + unit*4, units 0..7 */
@@ -228,6 +231,7 @@ extern int	printf();
 
 /* per-unit static-geometry cache; defined below, filled from z3660map() above it */
 static void	z3660_geom_fill();
+static void	z3660_geom_sweep();
 
 static volatile uchar	*regs;		/* board+0x2000 register window  */
 static volatile uchar	*bounce;	/* board+0x80000 bounce buffer   */
@@ -236,9 +240,10 @@ static long		board_phys;
 #ifndef	HOST_TEST
 #define	WRLONG(cmd,val)	(*(volatile ulong *)(regs + (cmd)) = (ulong)(val))
 #define	RDLONG(cmd)	(*(volatile ulong *)(regs + (cmd)))
-#endif	/* !HOST_TEST: the host harness force-includes its own WRLONG/RDLONG
-	 * (test/host/mock_regs.h) that drive a mock piscsi mailbox instead of
-	 * real MMIO.  Inert for the kernel build -- no HOST_TEST, no change. */
+#define	RDVPOSR()	(*(volatile ushort *)VPOSR)
+#endif	/* !HOST_TEST: the host harness force-includes its own WRLONG/RDLONG/
+	 * RDVPOSR (test/host/mock_regs.h) that drive a mock piscsi mailbox and a
+	 * mock Agnus/Alice id instead of real MMIO.  Inert for the kernel build. */
 
 /* last-transaction diagnostics (read via /dev/mem or a probe tool) */
 ulong	z3660_lastblock, z3660_lastlen, z3660_blocks0, z3660_dma;
@@ -633,6 +638,70 @@ int	s;
 }
 
 /*
+ * ZS-02 -- the mailbox signature.  Detection may only claim a board whose
+ * mailbox answers something the OPEN BUS cannot produce.  The old test,
+ * DRVTYPE in {0,1}, is passed by a bus that reads all-zero (the P6.2 hole).
+ *
+ * The piscsi protocol has no version or magic register (z3660_scsi_enums.h,
+ * fork and stock alike), so the signature is built from what every firmware
+ * does have, fork (scsi.c handle_piscsi_reg_write/handle_piscsi_read) and
+ * stock (upstream main, same functions) and the amiberry emulation alike:
+ *
+ *   1. two STORAGE registers, written with two different keys and read back
+ *      in the order they were written:
+ *        P_READ_ADDR2  (0x24)  <- Z3660_SIG_K1 0xA55A3CC3, must read K1
+ *        P_WRITE_ADDR2 (0x244) <- Z3660_SIG_K2 0x3CC3A55A, must read K2
+ *      All-zero and all-ones fail (neither key is 0 or ~0), an address echo
+ *      fails (neither key is a board address or offset, in either half), and
+ *      a bus that holds the LAST driven value fails because 0x24 is read
+ *      after 0x244 was written and returns K2, not K1.
+ *   2. a cross-register coupling RAM cannot fake: P_DRVNUMX (0x90) is written
+ *      with two different units and P_DRVNUM (0x08), which is never written,
+ *      must follow it both times (it returns piscsi_cur_drive).  Plain memory
+ *      at the probe address passes 1 and fails this.
+ *   3. P_DRVTYPE (0x0C) in {0,1} for the unit left selected, as before.
+ *
+ * Both ADDR2 cells are length registers that every transfer rewrites before
+ * its doorbell, and DRVNUMX is rewritten by every command, so the probe leaves
+ * nothing behind.  `leave` is the unit left selected afterwards; the first
+ * coupling value is leave^1, so it always differs from the second.
+ * 1 = answered; the values read are kept in z3660_sig_rd[] for kmem.
+ */
+#define	Z3660_SIG_K1	0xA55A3CC3UL
+#define	Z3660_SIG_K2	0x3CC3A55AUL
+
+ulong	z3660_sig_ok;		/* 1 once the mailbox has answered the signature */
+ulong	z3660_sig_fails;	/* signature attempts that failed                */
+ulong	z3660_sig_deferred;	/* 1 = AutoConfig board attached, sweep deferred */
+ulong	z3660_sig_rd[5];	/* last reads: ADDR2 x2, DRVNUM x2, DRVTYPE      */
+
+static int
+z3660_sig( leave)
+int	leave;
+{
+	ulong	p;
+
+	p = (ulong)(leave ^ 1);
+	WRLONG( P_READ_ADDR2,  Z3660_SIG_K1);
+	WRLONG( P_WRITE_ADDR2, Z3660_SIG_K2);
+	z3660_sig_rd[0] = RDLONG( P_READ_ADDR2);	/* first written, read first */
+	z3660_sig_rd[1] = RDLONG( P_WRITE_ADDR2);
+	WRLONG( P_DRVNUMX, p);
+	z3660_sig_rd[2] = RDLONG( P_DRVNUM);
+	WRLONG( P_DRVNUMX, leave);
+	z3660_sig_rd[3] = RDLONG( P_DRVNUM);
+	z3660_sig_rd[4] = RDLONG( P_DRVTYPE);		/* firmware returns 0 or 1 */
+	if (z3660_sig_rd[0] == Z3660_SIG_K1 && z3660_sig_rd[1] == Z3660_SIG_K2 &&
+	    z3660_sig_rd[2] == p && z3660_sig_rd[3] == (ulong)leave &&
+	    z3660_sig_rd[4] <= 1) {
+		z3660_sig_ok = 1;
+		return 1;
+	}
+	z3660_sig_fails++;
+	return 0;
+}
+
+/*
  * Map the register window and the bounce buffer into kernel VA and verify the
  * mailbox answers.  0 on success; ENXIO when no Z3660 is present.
  *
@@ -640,8 +709,17 @@ int	s;
  * when that misses (table unreliable on 2.1, or the board is outside the
  * autoconfig chain at the fixed base) probe Z3660_FIXED directly -- but only
  * on AGA, so the ECS build box (no Z3660, open bus at 0x10000000) never goes
- * there.  The mailbox is then verified by reading DRVTYPE (the firmware returns
- * only 0 or 1; anything else means open bus / not a piscsi window).
+ * there.  The mailbox is then verified by the ZS-02 signature (z3660_sig()).
+ *
+ * DECISION ORDER (ZS-02, NOTES.md 2026-09-27):
+ *   1. autocon(0x144B0001) -- the board's own ConfigDev.  AutoConfig has
+ *      already proved a Z3660 is there, so a signature that does not answer
+ *      YET does not un-find it: the board attaches, the unit sweep is deferred
+ *      (one console line), and every later command re-tries the signature
+ *      before it trusts any geometry (z3660_geom_get()).
+ *   2. only when autocon() finds nothing, and only on AGA (VPOSR >= 0x22):
+ *      the fixed base 0x10000000.  Here nothing but the signature says a Z3660
+ *      is present, so no signature means ENXIO and the window is dropped.
  *
  * MAPPING STRATEGY -- why the metal box needs no sptalloc() at all.
  *
@@ -725,13 +803,14 @@ static int
 z3660map()
 {
 	long	base, size;
-	ulong	t, bp;
-	int	i, e;
+	ulong	bp;
+	int	e, found;
 
 	if (regs)
 		return 0;
-	unless (autocon( Z3660_PROD, 0, &base, &size)) {
-		if ((((*(volatile ushort *)VPOSR) >> 8) & 0x7F) < 0x22) {
+	found = autocon( Z3660_PROD, 0, &base, &size);
+	unless (found) {
+		if (((RDVPOSR() >> 8) & 0x7F) < 0x22) {
 			z3660_present = 0;
 			return ENXIO;	/* ECS/OCS machine -- no Z3660 here */
 		}
@@ -760,12 +839,18 @@ z3660map()
 		regs = 0;		/* sptalloc failure, or a base of 0 */
 		return ENOMEM;
 	}
-	WRLONG( P_DRVNUMX, 6);
-	t = RDLONG( P_DRVTYPE);			/* firmware returns 0 or 1 only */
-	if (t > 1) {
-		regs = 0;			/* open bus / not a piscsi window */
-		z3660_present = 0;
-		return ENXIO;
+	unless (z3660_sig( 6)) {
+		unless (found) {
+			regs = 0;		/* fixed base: open bus, not a piscsi window */
+			z3660_present = 0;
+			if (z3660_sig_fails == 1)
+				printf( "z3660: no piscsi mailbox at 0x%x\n", (int)bp);
+			return ENXIO;
+		}
+		/* AutoConfig found it; the mailbox is not answering yet */
+		z3660_sig_deferred = 1;
+		printf( "z3660: board at 0x%x not answering the mailbox signature; unit sweep deferred\n",
+			(int)bp);
 	}
 	z3660_present = 1;
 	/*
@@ -785,9 +870,12 @@ z3660map()
 	 * invalidation rationale -- in short, every firmware remap is bracketed by
 	 * a 68k reset that reloads this kernel, so the cache cannot go stale.
 	 * Runs inside the caller's spl6 mailbox bracket, like the probe above.
+	 * Only on a mailbox that answered the signature: a sweep of a window that
+	 * reads zeros would name every unit "no drive mapped" (the 2026-09-27
+	 * emulator sptalloc-arm console lines, NOTES.md).
 	 */
-	for (i = 0; i < Z3660_NUNITS; ++i)
-		z3660_geom_fill( i);
+	if (z3660_sig_ok)
+		z3660_geom_sweep();
 	return 0;
 }
 
@@ -991,11 +1079,27 @@ int	unit;
 	z3660_geom[unit].valid   = 1;		/* unmapped units stay re-readable */
 }
 
+static void
+z3660_geom_sweep()
+{
+	int	i;
+
+	for (i = 0; i < Z3660_NUNITS; ++i)
+		z3660_geom_fill( i);
+}
+
 /*
  * The single geometry entry point on the command path: a cache hit costs no
  * mailbox traffic whatsoever.  A miss can only be a unit that had no drive
  * mapped when the cache was filled, and it then costs exactly what the pre-cache
  * driver always spent -- once per command, not once per fact.
+ *
+ * A board attached with the sweep deferred (AutoConfig found it, the mailbox
+ * did not answer the signature) re-tries the signature first: until it answers,
+ * nothing is read, cached or named, and the unit gets the absent answer, so
+ * every data command to it is refused exactly as an unmapped unit's would be.
+ * The first command after it answers runs the deferred sweep, and re-selects
+ * its own unit, which the sweep moved.
  */
 static struct z3660_unitgeom *
 z3660_geom_get( unit)
@@ -1003,10 +1107,47 @@ int	unit;
 {
 	if (unit < 0 || unit >= Z3660_NUNITS)
 		return &z3660_geom_absent;
-	if (z3660_geom[unit].valid == 0)
+	if (z3660_geom[unit].valid == 0) {
+		if (z3660_sig_ok == 0) {
+			unless (z3660_sig( unit))
+				return &z3660_geom_absent;
+			z3660_geom_sweep();
+			WRLONG( P_DRVNUMX, unit);
+			return &z3660_geom[unit];
+		}
 		z3660_geom_fill( unit);
+	}
 	return &z3660_geom[unit];
 }
+
+#ifdef	HOST_TEST
+/*
+ * Harness-only: forget the board so another detection cell can run in the
+ * same process.  Not compiled into the kernel.
+ */
+void
+z3660_test_unmap()
+{
+	int	i;
+
+	regs = 0;
+	bounce = 0;
+	board_phys = 0;
+	z3660_present = 0;
+	z3660_direct_map = 0;
+	z3660_sig_ok = 0;
+	z3660_sig_fails = 0;
+	z3660_sig_deferred = 0;
+	z3660_skipmask = 0;
+	z3660_skip_msgs = 0;
+	for (i = 0; i < Z3660_NUNITS; ++i) {
+		z3660_geom[i].bs = 512;
+		z3660_geom[i].nblocks = 0;
+		z3660_geom[i].pdt = 0;
+		z3660_geom[i].valid = 0;
+	}
+}
+#endif	/* HOST_TEST */
 
 /*
  * Run one block READ or WRITE through the piscsi mailbox, chunked to <=64KB.

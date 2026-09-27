@@ -1065,6 +1065,24 @@ sweep runs as before, and the console is the same (only the unmapped units named
 more trips (the old DRVTYPE probe was 2). On the emulator's `sptalloc` arm the eight false
 `no drive mapped` lines become one `unit sweep deferred` line (previous section).
 
+**Evidence (host and link only; no metal, no emulator run).**
+- `make -C test/host check`: **155 gating passed, 0 failed**, 6/6 stretch parity (was 131/0).
+  One existing pin moved: attach DRVNUMX writes 3 → 4 (the signature selects two units; the old
+  probe selected one). New: `z3660_sig_ok` at attach, and 23 ZS-02 gates in
+  `test_zs02_detection()` — absent board on an all-zero, all-ones, address-echo, last-value-latch
+  and RAM bus (each refused, nothing swept or named, no doorbell), the real signature at the fixed
+  base, the ECS gate with zero mailbox accesses, and the ConfigDev-first deferral (silent mailbox:
+  attached, no unit named, READ refused, no re-map; answering: the same READ returns block 3 and
+  the sweep names only the six empty units). The mock gained bus modes, an autocon base and a
+  VPOSR seam (`RDVPOSR()`, inert in the kernel build).
+- **Negative control:** the same cells against this source with the signature reduced to the old
+  DRVTYPE-only test fail 7 (all-zero and RAM accepted; the ConfigDev cell names phantom units).
+- **Driver-line link:** `relink-040-z3660.sh` over `build/unix-040-driver-line`
+  (sha256 `5412647a…`, amix-040-060-port `bd36a02`, isolated `git archive` tree) — TOTAL
+  complaints 0, no unresolved symbols; `z3660_040.o` imports still exactly
+  `autocon bcopy printf sptalloc`; scan060 **CLEAN** on `z3660_040.o` (1030 decoded lines), and the
+  relinked kernel's candidate count is 53 before and after.
+
 **Open.** A bench cell on a non-Z3660 AGA rig (D45) and the metal re-check of the direct arm are
 owed; neither was run here. The fork firmware prints nothing for these accesses; stock is read
 from source only.

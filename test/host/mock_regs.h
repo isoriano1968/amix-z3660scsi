@@ -18,6 +18,10 @@
 extern unsigned long z3660_mock_rdlong(unsigned int cmd);
 extern void          z3660_mock_wrlong(unsigned int cmd, unsigned long val);
 
+extern unsigned short z3660_mock_vposr(void);
+
 #define WRLONG(cmd,val)	z3660_mock_wrlong((unsigned int)(cmd), (unsigned long)(val))
 #define RDLONG(cmd)	z3660_mock_rdlong((unsigned int)(cmd))
+/* the machine gate's Agnus/Alice id read ($DFF004), a real deref on metal */
+#define RDVPOSR()	z3660_mock_vposr()
 #endif

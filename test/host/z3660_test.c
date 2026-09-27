@@ -39,6 +39,13 @@ extern int	z3660present();		/* sd.c probe hook (K&R decl) */
 extern unsigned long	z3660_skipmask, z3660_skip_msgs;
 static char	*g_probe_base;		/* board base z3660present() reports */
 
+/* ZS-02 detection state (driver) and the harness-only reset */
+extern unsigned long	z3660_sig_ok, z3660_sig_fails, z3660_sig_deferred;
+extern unsigned long	z3660_sig_rd[5];
+extern unsigned char	z3660_present;
+extern long		z3660_cache;
+extern void		z3660_test_unmap();
+
 /* CD units on this mock bus: 6 = CD-ROM (also the detection-probe unit), 0 = disk. */
 #define U_CD	6
 #define U_DISK	0
@@ -166,8 +173,10 @@ static void test_direct_mapping()
 	       "attach reads BLOCKS only for the 2 units with a valid block size");
 	CHECK( mock_trips_pdt == 2,
 	       "attach reads PDT only for the 2 present units");
-	CHECK( mock_trips_drvnumx == 3,
-	       "attach selects each present unit before its PDT read (2) + the DRVTYPE probe (1)");
+	CHECK( mock_trips_drvnumx == 4,
+	       "attach selects each present unit before its PDT read (2) + the ZS-02 signature's two selects (2)");
+	CHECK( z3660_sig_ok == 1,
+	       "attach: the mailbox answered the ZS-02 signature before the sweep");
 	CHECK( mock_div0 == 0,
 	       "attach never reads BLOCKS of a block-size-0 unit (stock fw would divide by 0)");
 	CHECK( z3660_skipmask == 0xBE && z3660_skip_msgs == 6,
@@ -1049,6 +1058,134 @@ static void test_f3_cache()
 	       z3660_cache, z3660_ci_enforce);
 }
 
+
+/* ====================================================================== */
+/* GATING: ZS-02 detection -- a signature the open bus cannot fake.        */
+/*                                                                         */
+/* Each cell starts from a forgotten board (z3660_test_unmap) and a fresh  */
+/* mock, sets what autocon(), VPOSR and the probe address answer, and asks */
+/* z3660present() -- the 030 line's sd.c probe hook -- for a verdict.      */
+/* The absent-board cells take the fixed-base path (autocon misses, AGA),  */
+/* which is the P6.2 hole: before ZS-02 every one of the all-zero, latch   */
+/* and RAM cells was accepted, because DRVTYPE read 0 or a stored value <=1.*/
+/* ====================================================================== */
+
+static int zs_cell( autocon_base, vposr, bus)
+unsigned long	autocon_base;
+unsigned short	vposr;
+int		bus;
+{
+	mock_reset();
+	mock_add_drive( U_CD,   0x05, CD_BS, CD_NBLK, 128UL * CD_BS);
+	mock_add_drive( U_DISK, 0x00, DK_BS, DK_NBLK, 256UL * DK_BS);
+	z3660_test_unmap();
+	z3660_cache = 0;
+	mock_autocon_base = autocon_base;
+	mock_vposr = vposr;
+	mock_bus_mode = bus;
+	g_probe_base = 0;
+	return z3660present( &g_probe_base);
+}
+
+static int zs_no_doorbells()
+{
+	int	i;
+
+	for (i = 0; i < 8; i++)
+		if (mock_doorbells[i])
+			return 0;
+	return 1;
+}
+
+static void zs_absent( name, bus)
+const char	*name;
+int		bus;
+{
+	char	msg[160];
+	int	r;
+
+	r = zs_cell( 0UL, (unsigned short)0x2300, bus);
+	printf("       %-9s present=%d reads %08lX %08lX drvnum %lX %lX drvtype %lX\n",
+	       name, r, z3660_sig_rd[0], z3660_sig_rd[1], z3660_sig_rd[2],
+	       z3660_sig_rd[3], z3660_sig_rd[4]);
+	sprintf( msg, "ZS-02 %s bus, no ConfigDev, AGA: z3660present() refuses", name);
+	CHECK( r == 0 && z3660_present == 0 && z3660_sig_ok == 0, msg);
+	sprintf( msg, "ZS-02 %s bus: no unit swept or named, no doorbell", name);
+	CHECK( mock_trips_blocksize == 0 && z3660_skip_msgs == 0 && zs_no_doorbells(), msg);
+}
+
+static void test_zs02_detection()
+{
+	uchar	cdb[10], buf[2048];
+	int	r;
+
+	printf("\n=== GATE: ZS-02 detection -- two-value mailbox signature ===\n");
+
+	/* 1. absent board, all-zero bus: the P6.2 hole itself */
+	zs_absent( "all-zero", MOCK_BUS_ZERO);
+	CHECK( z3660_sig_rd[4] <= 1,
+	       "ZS-02 all-zero: DRVTYPE alone reads 0 -- the pre-ZS-02 test would have accepted it");
+
+	/* 2. absent board, all-ones bus */
+	zs_absent( "all-ones", MOCK_BUS_ONES);
+
+	/* 3. absent board, a bus that echoes the address of the access */
+	zs_absent( "addr-echo", MOCK_BUS_ECHO);
+
+	/* 4. absent board, a bus holding the last driven value */
+	zs_absent( "latch", MOCK_BUS_LATCH);
+	CHECK( z3660_sig_rd[0] == 0x3CC3A55AUL,
+	       "ZS-02 latch: cell 1 read back the LAST write (K2), not K1 -- the read order defeats it");
+
+	/* 5. absent board, plain RAM at the probe address */
+	zs_absent( "ram", MOCK_BUS_RAM);
+	CHECK( z3660_sig_rd[0] == 0xA55A3CC3UL && z3660_sig_rd[1] == 0x3CC3A55AUL,
+	       "ZS-02 ram: the storage cells alone pass -- RAM stores");
+	CHECK( z3660_sig_rd[2] != 7UL,
+	       "ZS-02 ram: DRVNUM does not follow DRVNUMX -- the coupling defeats RAM");
+
+	/* 6. real signature at the fixed base: autocon misses, AGA, board answers */
+	r = zs_cell( 0UL, (unsigned short)0x2300, MOCK_BUS_BOARD);
+	printf("       real-sig  present=%d base=0x%08lX direct=%d sig_ok=%lu skipmask=0x%02lX\n",
+	       r, (unsigned long)g_probe_base, (int)z3660_direct_map, z3660_sig_ok, z3660_skipmask);
+	CHECK( r == 1 && (unsigned long)g_probe_base == 0x10000000UL && z3660_direct_map == 1,
+	       "ZS-02 real signature at the fixed base: attached on the direct arm");
+	CHECK( z3660_sig_ok == 1 && z3660_sig_rd[2] == 7UL && z3660_sig_rd[3] == 6UL && z3660_sig_rd[4] == 1UL,
+	       "ZS-02 real signature: K1/K2 read back, DRVNUM followed 7 then 6, DRVTYPE 1");
+	CHECK( z3660_skipmask == 0xBE && z3660_skip_msgs == 6 && mock_vposr_reads == 1,
+	       "ZS-02 real signature: the unit sweep ran once, after the machine gate");
+
+	/* 7. machine gate: autocon misses on ECS -- the window is never touched */
+	r = zs_cell( 0UL, (unsigned short)0x2000, MOCK_BUS_BOARD);
+	CHECK( r == 0 && mock_trips == 0 && mock_vposr_reads == 1,
+	       "ZS-02 ECS/OCS: refused by VPOSR with zero mailbox accesses");
+
+	/* 8. ConfigDev first: autocon hit, mailbox reads all-zero at attach (the
+	 *    2026-09-27 emulator sptalloc-arm case), then starts answering. */
+	r = zs_cell( 0x40000000UL, (unsigned short)0x2300, MOCK_BUS_ZERO);
+	printf("       cfgdev    present=%d base=0x%08lX direct=%d deferred=%lu skip_msgs=%lu\n",
+	       r, (unsigned long)g_probe_base, (int)z3660_direct_map,
+	       z3660_sig_deferred, z3660_skip_msgs);
+	CHECK( r == 1 && (unsigned long)g_probe_base == 0x40000000UL && z3660_direct_map == 0
+	       && mock_sptalloc_calls == 2 && mock_vposr_reads == 0,
+	       "ZS-02 ConfigDev: autocon-first attach, sptalloc arm, VPOSR never read");
+	CHECK( z3660_sig_ok == 0 && z3660_sig_deferred == 1 && z3660_skip_msgs == 0
+	       && mock_trips_blocksize == 0,
+	       "ZS-02 ConfigDev, silent mailbox: sweep deferred, NO unit named 'no drive mapped'");
+	memset( cdb, 0, sizeof cdb);
+	cdb[0] = 0x28; cdb[5] = 3; cdb[8] = 1;			/* READ(10) LBA 3, 1 block */
+	run_cmd( U_CD, cdb, 10, buf, (unsigned)CD_BS);
+	CHECK( !g_okay && z3660_skip_msgs == 0 && zs_no_doorbells() && mock_sptalloc_calls == 2,
+	       "ZS-02 ConfigDev, still silent: the READ is refused, nothing named, no re-map");
+	mock_bus_mode = MOCK_BUS_BOARD;				/* the mailbox answers now */
+	run_cmd( U_CD, cdb, 10, buf, (unsigned)CD_BS);
+	CHECK( g_okay && g_status == 0 && be32( buf) == 3UL,
+	       "ZS-02 ConfigDev, answering: the same READ completes with block 3's data");
+	CHECK( z3660_sig_ok == 1 && z3660_skipmask == 0xBE && z3660_skip_msgs == 6
+	       && mock_sptalloc_calls == 2,
+	       "ZS-02 ConfigDev, answering: the deferred sweep ran once and named only the 6 empty units");
+}
+
 int main()
 {
 	mock_reset();
@@ -1086,6 +1223,9 @@ int main()
 	CHECK( mock_div0 == 0,
 	       "whole run: no BLOCKS read of a block-size-0 unit (stock fw div0 never hit)");
 	printf("       whole-run div0=%lu\n", mock_div0);
+
+	/* ZS-02 cells reset the mock (and so mock_div0): run them last */
+	test_zs02_detection();
 
 	printf("\n=== GATING: %d passed, %d failed ===\n", g_pass, g_fail);
 	printf("=== STRETCH parity: %d match, %d deviation ===\n", s_match, s_dev);

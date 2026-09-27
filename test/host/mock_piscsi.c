@@ -165,29 +165,89 @@ unsigned long	paddr;
  * and so a base change re-exercises it: 1 page = the register window, more = the
  * bounce.
  */
+unsigned long	mock_sptalloc_calls;
+
 char *sptalloc( npages, flags, pfn, dummy)
 int		npages;
 unsigned long	flags, pfn;
 int		dummy;
 {
+	mock_sptalloc_calls++;
 	if (npages == 1)
 		return (char *)g_regs;
 	return (char *)g_bounce;
 }
 
 /*
- * autocon(): report the board found, at the shipped fixed base.  Returning
- * non-zero makes z3660map() take the happy path and skip the VPOSR ($DFF004)
- * hardware probe, which would segfault on the host.
+ * autocon(): by default report the board found, at the shipped fixed base.
+ * The ZS-02 cells set mock_autocon_base to 0 (no ConfigDev: the driver falls
+ * to the VPOSR gate and the fixed base) or to a base at/above VSECT1 (the
+ * sptalloc arm).  VPOSR is the Agnus/Alice id word; 0x2300 = AGA Alice.
  */
+unsigned long	mock_autocon_base = MOCK_BOARD_BASE;
+unsigned short	mock_vposr = 0x2300;
+unsigned long	mock_vposr_reads;
+
 int autocon( prod, idx, basep, sizep)
 long	prod;
 int	idx;
 long	*basep, *sizep;
 {
-	*basep = (long)MOCK_BOARD_BASE;
+	if (mock_autocon_base == 0)
+		return 0;
+	*basep = (long)mock_autocon_base;
 	*sizep = 0x00100000L;
 	return 1;
+}
+
+unsigned short z3660_mock_vposr()
+{
+	mock_vposr_reads++;
+	return mock_vposr;
+}
+
+/*
+ * phystokv() for the direct arm keys on MOCK_BOARD_BASE; a cell that moves the
+ * ConfigDev base must stay on that base or at/above VSECT1 (sptalloc arm).
+ */
+
+/* -------- ZS-02: what answers at the probe address --------------------- */
+int		mock_bus_mode;
+unsigned long	mock_bus_flaky_reads;
+static unsigned long	bus_latch;
+static unsigned long	bus_ram[0x300 / 4];
+
+/* 1 = the access goes to the board model; 0 = it was answered by the bus */
+static int bus_board()
+{
+	return mock_bus_mode == MOCK_BUS_BOARD ||
+	       (mock_bus_mode == MOCK_BUS_FLAKY && mock_bus_flaky_reads == 0);
+}
+
+static unsigned long bus_read( cmd)
+unsigned int	cmd;
+{
+	unsigned long	v;
+
+	switch (mock_bus_mode) {
+	case MOCK_BUS_ONES:	v = 0xFFFFFFFFUL;				break;
+	case MOCK_BUS_ECHO:	v = MOCK_BOARD_BASE + MOCK_REGS_OFF + cmd;	break;
+	case MOCK_BUS_LATCH:	v = bus_latch;					break;
+	case MOCK_BUS_RAM:	v = (cmd < 0x300) ? bus_ram[cmd / 4] : 0;	break;
+	case MOCK_BUS_FLAKY:	mock_bus_flaky_reads--;	v = 0;			break;
+	default:		v = 0;						break;
+	}
+	bus_latch = v;
+	return v;
+}
+
+static void bus_write( cmd, val)
+unsigned int	cmd;
+unsigned long	val;
+{
+	bus_latch = val;
+	if (mock_bus_mode == MOCK_BUS_RAM && cmd < 0x300)
+		bus_ram[cmd / 4] = val;
 }
 
 /* -------- data movement triggers --------------------------------------- */
@@ -267,6 +327,10 @@ unsigned long	val;
 	mock_trips_wr++;
 	if (cmd == R_DRVNUMX)
 		mock_trips_drvnumx++;
+	if (!bus_board()) {
+		bus_write( cmd, val);
+		return;
+	}
 	if (cmd >= R_READ_ADDR1 && cmd <= R_READ_ADDR4) {
 		u32_read[(cmd - R_READ_ADDR1) / 4] = val;
 		return;
@@ -295,6 +359,8 @@ unsigned int	cmd;
 	mock_trips_rd++;
 	if (cmd == R_PDT)
 		mock_trips_pdt++;
+	if (!bus_board())
+		return bus_read( cmd);
 	if (cmd >= R_BLOCKSIZE0 && cmd < R_BLOCKSIZE0 + MOCK_UNITS * 4) {
 		mock_trips_blocksize++;
 		cur_drive = (int)((cmd - R_BLOCKSIZE0) / 4);	/* firmware side effect */
@@ -359,6 +425,14 @@ void mock_reset()
 	memset( mock_doorbells, 0, sizeof mock_doorbells);
 	mock_trips_reset();
 	mock_spl_reset();
+	mock_bus_mode = MOCK_BUS_BOARD;
+	mock_bus_flaky_reads = 0;
+	bus_latch = 0;
+	memset( bus_ram, 0, sizeof bus_ram);
+	mock_autocon_base = MOCK_BOARD_BASE;
+	mock_vposr = 0x2300;
+	mock_vposr_reads = 0;
+	mock_sptalloc_calls = 0;
 	if (!g_bounce)
 		g_bounce = (unsigned char *)malloc( MOCK_BOUNCE);
 	memset( g_bounce, 0, MOCK_BOUNCE);

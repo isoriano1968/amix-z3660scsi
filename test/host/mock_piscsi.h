@@ -83,4 +83,28 @@ extern unsigned long mock_doorbells[8];
 void mock_set_geom(int unit, unsigned long pdt,
                    unsigned long block_size, unsigned long nblocks);
 
+
+/*
+ * ZS-02 detection cells.  What the probe address answers, and what autocon()
+ * and VPOSR report.  MOCK_BUS_BOARD (0, the default) is the real mailbox; the
+ * others model a window with NO piscsi board behind it -- writes reach no
+ * firmware (no doorbell, no unit select) and reads return:
+ *   ZERO   0x00000000 (the P6.2 hole)      ONES   0xFFFFFFFF
+ *   ECHO   the bus address of the access (board base + 0x2000 + offset)
+ *   LATCH  the last value driven on the bus (read or write)
+ *   RAM    plain memory: what was last written to that same offset
+ * FLAKY answers ZERO for the first mock_bus_flaky_reads reads, then BOARD
+ * (a mailbox that is not answering yet, then is).
+ * mock_autocon_base: 0 = autocon() misses; else the ConfigDev base it reports.
+ * Reset to BOARD / 0x10000000 / AGA (0x2300) by mock_reset().
+ */
+enum { MOCK_BUS_BOARD, MOCK_BUS_ZERO, MOCK_BUS_ONES, MOCK_BUS_ECHO,
+       MOCK_BUS_LATCH, MOCK_BUS_RAM, MOCK_BUS_FLAKY };
+extern int            mock_bus_mode;
+extern unsigned long  mock_bus_flaky_reads;
+extern unsigned long  mock_autocon_base;
+extern unsigned short mock_vposr;
+extern unsigned long  mock_vposr_reads;
+extern unsigned long  mock_sptalloc_calls;
+
 #endif
