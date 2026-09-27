@@ -20,6 +20,14 @@ number off a run, with its file), **derived** (arithmetic over measured facts, s
 > no-invalidate rule, the S11 census, and both arms of the M0 assertion.
 > **Nothing here is evidence about a real cache** — §7 is still owed, on metal.
 
+> **CORRECTION (2026-09-27, appended — nothing above or below was edited to match it).**
+> §7's premise "Amiberry models no 68040/060 copyback data cache" is wrong. amiberry models one
+> (per-longword dirty bits, eviction push), live only with `cpu_compatible=true`, `cachesize=0`
+> and `cpu_data_cache=true`; device DMA bypasses it (workspace
+> `tmp/2026-09-27-k0-dispatches/AB-03-report.md`). An emulator cell with the cache live can show a
+> missing CPUSH or CINV; the bench configs to date keep it off. The coherence **verdict** stays
+> metal-only (D-1 D42), so §7 is unchanged as the scoring protocol.
+
 ---
 
 ## 0. Why this driver has never needed a cache instruction

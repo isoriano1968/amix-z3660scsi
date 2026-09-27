@@ -22,7 +22,11 @@ several repos in the AMIX-on-Z3660 effort, each with a single job:
 
 The full map is in [`amix-kerntools/REPOS.md`](https://github.com/jusii/amix-kerntools/blob/master/REPOS.md).
 
-## Status (2026-08)
+## Status (2026-09-27)
+
+Latest: the stock-firmware unit-probe guard (70f54b6) is landed and pushed, and
+K0 is metal-proven with this driver on a real 68060 at 128 MB (A4000T, MD-3a,
+2026-09-27: root on the Z3660, reads and a 2.2 MB write equal to host truth).
 
 **Driver written, integrated, clean-gated, and proven on real hardware** ✅ —
 compiled with the native K&R `cc`, linked into the kernel (`checkunix`-clean),
@@ -58,8 +62,9 @@ Since that milestone — every item below has a dated entry in
   (`z3660_cache`, poked through `/dev/kmem`). Every deployment so far has run on an
   emulated CPU, which has no data cache. The round is pre-registered in
   [docs/BLIZZARD-F3.md](docs/BLIZZARD-F3.md) — and **nothing in it is yet evidence
-  about a real cache**: the metal A/B is still owed, and the bench emulator cannot run
-  it (it models no 040/060 copyback data cache).
+  about a real cache**: the metal A/B is still owed. The bench emulator does model a
+  040/060 copyback cache when it is kept live, so it can show a missing push or
+  invalidate, but the coherence verdict is metal-only.
 
 On **2026-08-26** this driver served the AMIX root disk on a real **68LC060** for the
 first time — three boots for three to multiuser with live piscsi I/O — but on the

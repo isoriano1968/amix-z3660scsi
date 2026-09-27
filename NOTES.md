@@ -250,6 +250,10 @@ crumb decode in the iteration commits). Chronology of findings:
    synchronously → double-issued &dp->com (async drivers) or unbounded recursion (synchronous
    drivers). Fixed (issue-next-then-iodone) + z3660 completions deferred via timeout() — both
    verified booting in Amiberry.
+   *Correction 2026-09-27:* the `timeout()` deferral is gone. Since a5af58a (2026-07-12 section
+   below) completions are delivered synchronously, before `z3660queue()` returns, through a
+   driver-owned FIFO with a `completing` guard that flattens `dd.c`'s re-issue recursion
+   (`src/z3660.c`, `z3660_complete()` and the comment above it). The `dd.c` ordering fix stands.
 
 **Firmware fix domain:** the `Z3660-amix` firmware fork, branch amix-boot, cpummu030.cpp /
 m68k_run_mmu030 ifetch-fault restart path. Build chain verified: `make z3660_emu` cross-compiles
@@ -539,6 +543,14 @@ mapping arms are **not** alike on 040/060:
   window would take `hat_cm_ram`, i.e. **COPYBACK**. A cacheable mailbox is not a slow driver, it is a
   broken one. That arm is **UNSUPPORTED on real 040/060 silicon**, and is detected and counted
   (`z3660_sptalloc_unsafe`) rather than silently taken.
+  *Correction 2026-09-27:* the verdict stands, the reason did not. `hat_cm_ram` applies to managed
+  pages only. An unmanaged device page mapped for a user (`hat_devload`) goes to `Lcm_dev`: NCS
+  unconditionally on r13 / candidate-2 / candidate-3 (no `hat_cm_fb` table there), NCS on the
+  driver-line base unless a registered framebuffer range makes it NC (workspace
+  `tmp/2026-09-27-po05-prep/HAT-CM-FB-R13.md`). This arm is a *kernel* mapping and never reaches
+  `Lcm_sel`: `sptalloc()` ignores its mode and `segkmem_mapin` copies a `CM=00` template, i.e.
+  **writethrough-cacheable** (port `src/devkvmap040.s` header, `src/segkmem040.s` B1 note). Still a
+  cacheable mailbox, so still unsupported; the remedy is an NCS `dev_kvmap`, as Antti's va2000 does.
 
 Corrected in `src/z3660.c` by 900f095; derivation in [`docs/BLIZZARD-F3.md`](docs/BLIZZARD-F3.md) §1.4
 and §3.3. Nothing about the *page count* or the `sptalloc`-removal argument above changes — this is a
@@ -869,6 +881,12 @@ pre-registered in `docs/BLIZZARD-F3.md` §7 — arm A (`z3660_cache = 0`) expect
 cycles and 8/8 byte-identical canaries on arm B, with `z3660_push_n > 0` as a gate so a green run with
 a zero counter counts as failed — is still **owed**, and the bench structurally cannot run it: the
 emulator models no 040/060 copyback data cache.
+*Correction 2026-09-27:* that last clause is wrong. amiberry **does** model a 040/060 copyback data
+cache (per-longword dirty bits, eviction push), live only with `cpu_compatible=true`, `cachesize=0`
+and `cpu_data_cache=true`; device DMA bypasses it (workspace
+`tmp/2026-09-27-k0-dispatches/AB-03-report.md`). So an emulator cell with the cache kept live *can*
+show a missing CPUSH or a missing CINV. The current bench configs keep it off, and the coherence
+**verdict** stays metal-only (D-1 D42).
 
 ## 2026-08-26: first boot of AMIX off this driver on real 68LC060 silicon
 
@@ -964,3 +982,36 @@ exactly `autocon bcopy printf sptalloc`.
 keeps its old block size and count with `fd == 0`; only `P_DRVTYPE` could tell. Every remap is
 bracketed by a 68k reset (see the cache note above), so this needs a firmware-side unmap-without-
 remap to bite. Metal on stock firmware is the open verification.
+
+## 2026-09-27: the sptalloc-arm console lines are emulator-only
+
+**What the bench prints.** On the kerntools R-060 rig (emulated LC060, the emulated Z3660 board
+autoconfigured at `0x40000000`, i.e. the `sptalloc` arm), every boot of candidate-3 and KD060-Z0
+prints `z3660: sptalloc mapping arm is unsupported with a live data cache`, then `z3660:
+cache-inhibit assertion FAILED (cache=60 cacr 0x80008000)`, then `z3660: unit N: no drive mapped,
+skipped` for **all eight** units. Unit 6 still roots the box and moves data equal to host truth
+(workspace `review/T-5`). **On metal none of this appears**: the board sits at `0x10000000`, the
+direct arm is used, and only the unmapped units are named (MD-3a on the A4000T, `review/T-7`).
+
+**Reading, line by line.**
+
+- The first two lines are *right for silicon and moot on the rig*. The 040/060 kernels stamp
+  `z3660_cache = 60` (port `src/z3660_cache_arm.s` + `patch_z3660_cache.py`), so the driver runs
+  the free-ride check; on this arm the window is a `CM=00` writethrough-cacheable kernel mapping
+  (see the 2026-08-14 correction above), which a real 060 would cache. The rig's emulated data
+  cache is off (`cpu_data_cache=false`), so nothing is actually cached there. No change: the driver
+  cannot know it is emulated, and the warning is the correct one for the arm.
+- The skip lines are *wrong*. Each is printed when `P_BLOCKSIZE0+4n` reads 0 at attach, so on the
+  rig every attach-time mailbox read returned 0, including unit 6's. The skip is not a mask
+  (`valid` stays 0, the unit is re-read on its next command), which is why unit 6 recovers once
+  reads start answering. Why the first reads return 0 on that arm is not established (candidates:
+  a translation not yet live for the fresh `sptalloc` VA, or a stale ATC entry). The same attach
+  also accepts DRVTYPE = 0, which is the P6.2 hole below.
+
+**Fix, and where it lands.** The skip path is the one that lies, so the fix is to the skip, not to
+the cache message: geometry (and with it every skip line) is only trusted after the mailbox has
+answered the ZS-02 signature. A board found by `autocon()` whose mailbox does not answer yet is
+still attached (AutoConfig already proved it is a Z3660), but the sweep is deferred and one line
+says so; the per-unit skip lines appear only once the signature answers. That is a code change,
+so it lands with ZS-02 (next section), not in the comment-only correction commit, whose object is
+byte-identical by requirement.

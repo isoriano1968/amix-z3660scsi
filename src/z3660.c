@@ -9,8 +9,13 @@
  * window: with autoconfig_rtg YES it is a Zorro III AutoConfig board (manuf
  * 0x144B, product 0x01) and KS places it high (0x40000000+); with autoconfig_rtg
  * NO (the usual config) the very same window sits at a FIXED 0x10000000 and is
- * never autoconfigured at all.  On Amix 2.1 the bootinfo autocon table is also
- * unreliable on real metal (see grimoire-amix: hydra detection).  So detection
+ * never autoconfigured at all.  On the stock 030 boot2 the bootinfo autocon table
+ * is also unreliable on real metal (see grimoire-amix: hydra detection).  That is
+ * the stock 030 boot2 only: boot2-040 hands the Z3660's ConfigDev over on metal
+ * (amix-z3660rtg, A4000D, 2026-09-18), and the 2026-09-27 MD-3a run on a real
+ * 68060 attached autocon-first -- the 040/060 line registers this card only via
+ * sd.c's autocon() loop, so rooting on it proves the hand-over (workspace
+ * review/T-7).  So detection
  * is multi-method, like the Hydra driver: try autocon() first, then -- only on
  * an AGA machine (VPOSR >= 0x22; the ECS build box must never touch it) -- probe
  * the fixed base directly and verify the mailbox answers (DRVTYPE reads 0/1).
@@ -454,10 +459,11 @@ ulong	lo, hi;			/* board window: lo inclusive, hi exclusive */
 		}
 	}
 	/*
-	 * The sptalloc arm is a separate failure and a worse one: its window is
-	 * page-table-backed, and per-map device cache mode is still hat040.s's
-	 * deferred TODO, so the mailbox would be mapped COPYBACK.  See the mapping
-	 * note above z3660map().
+	 * The sptalloc arm is a separate failure: its window is page-table-backed,
+	 * and on the 040/060 line sptalloc() ignores its mode argument, so
+	 * segkmem_mapin builds a CM=00 leaf -- WRITETHROUGH CACHEABLE (port
+	 * src/devkvmap040.s header; src/segkmem040.s B1 note).  Not copyback, not
+	 * NCS.  See the mapping note above z3660map().
 	 */
 	if (z3660_direct_map == 0) {
 		z3660_sptalloc_unsafe++;
@@ -700,11 +706,18 @@ int	s;
  *   ASSERTS it at attach (z3660_ci_check) instead of assuming it.
  *
  *   SPTALLOC arm (board at/above VSECT1, i.e. autoconfig_rtg YES): the mapping is
- *   page-table-backed, and per-map device CM is still hat040.s's deferred TODO --
- *   so the window would take hat_cm_ram, i.e. COPYBACK, and the mailbox would be
- *   cacheable.  That is not a slow driver, it is a broken one.  This arm is
- *   therefore UNSUPPORTED on real 040/060 silicon until that TODO lands; it is
- *   detected and counted (z3660_sptalloc_unsafe), not silently taken.
+ *   page-table-backed.  CORRECTED 2026-09-27: it is NOT copyback via hat_cm_ram
+ *   -- hat_cm_ram applies to managed pages only; an unmanaged device page mapped
+ *   for a USER (hat_devload) gets Lcm_dev, unconditionally NCS on the r13 /
+ *   candidate-2 / candidate-3 kernels, which have no hat_cm_fb table, and NCS on
+ *   the driver-line base unless a registered framebuffer range makes it NC
+ *   (workspace tmp/2026-09-27-po05-prep/HAT-CM-FB-R13.md).  But this arm is a
+ *   KERNEL mapping that never reaches Lcm_sel: sptalloc() ignores its mode and
+ *   segkmem_mapin copies a CM=00 template, i.e. WRITETHROUGH CACHEABLE (port
+ *   src/devkvmap040.s header).  A cacheable mailbox is still a broken one, so
+ *   this arm stays UNSUPPORTED on real 040/060 silicon (the remedy is an NCS
+ *   dev_kvmap, as va2000 does); it is detected and counted
+ *   (z3660_sptalloc_unsafe), not silently taken.
  *
  * Neither mapping was ever freed, on either path.
  */
