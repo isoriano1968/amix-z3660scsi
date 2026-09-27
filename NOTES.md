@@ -1139,3 +1139,43 @@ cells observe. `make -C test/host check`: 155 passed, 0 failed; 6/6 parity.
 
 **Pin.** kerntools re-pins the z3660 object from `55e37689…` to the new sha256; DL-00/DL-08/DL-13,
 MD-3a and MG1–MG3 have to be re-run on it (T-9 item 4). Not run here.
+
+## 2026-09-27: A1 — console lines that stay true on the sptalloc arm
+
+ZS-02 already stops the attach sweep from naming units before the mailbox answers. Three lines
+could still say something false or say nothing:
+
+- **A recovered skip.** A skip is not a mask (the unit is re-read on every command), so a unit
+  named `no drive mapped, skipped` that later answers kept its skip bit and its console line. Now
+  `z3660_geom_fill()` withdraws the bit and prints `z3660: unit N: drive answering now (skipped
+  earlier)` once; `z3660_skipmask` names exactly the units skipped now, `z3660_skip_recovered`
+  counts the recoveries.
+- **The cache-inhibit verdict.** `cache-inhibit assertion FAILED (...)` now ends with `not
+  enforced, continuing` (the default) or `attach refused` (`z3660_ci_enforce`). The
+  `sptalloc mapping arm is unsupported with a live data cache` line is unchanged: CACR reads
+  `0x80008000` (DC on) on the rig, so it is true as the CPU reports it.
+- **A silent mapping failure.** `sptalloc()` returning 0 made `z3660map()` return ENOMEM with no
+  output, and every command retried it. Now the first failure prints `z3660: cannot map the board
+  at 0x...`; `z3660_map_fails` counts all of them.
+
+**DL-08 ECS row (`/dev/rdsk/ced0s2` answers "I/O error").** Not a missing attach gate. In that rig
+config the emulated Z3660 is autoconfigured at `0x40000000` (card 1, `root6.hdf` on unit 6), so
+`sd.c`'s autocon loop builds a card-1 row and the VPOSR gate never applies (it guards only the
+fixed-base fallback). The row is correct and ENXIO would be wrong there. The driver cannot pick
+the errno anyway: it returns only `status`/`okay`, `sdopen()` answers ENXIO only for a card with
+no row, and the stock layer turns a failed command into EIO. The EIO means the driver refused the
+command. The kernel (KD060-Z0-W) carried the pre-ZS-02 object, whose silent refusals were a
+DRVTYPE > 1 read (ENXIO, no output) or an ENOMEM map failure. The attach reads on this arm fail
+in the same unexplained way as on AGA. With ZS-02 and this change, the same row prints either the
+deferred-sweep line or the map-failure line, so a re-run of DL-08 row b shows which one it is.
+
+**Evidence.** `make -C test/host check`: **161 passed, 0 failed**, 6/6 parity (was 155/0). New
+`test_console_truthful()` (6 gates): a unit reading block size 0 at attach is named with the 6
+skipped units, answers later with block 2's data, leaves the mask (`0xBE` → `0xB6`), is named
+once; a failing `sptalloc()` (new mock knob) refuses the probe with no mailbox access, a later
+command retries and fails with no doorbell, and the line prints once for two failures.
+**Negative control:** the same tests against `18e7eb2` fail 4. Cross-built via `build/mkobj.sh`
+with the T-9 flags: `z3660_040.o` sha256 `6c347e25…`, sum -r 10405 9, 9184 B; `z3660_030.o`
+`ca2ef1cb…`, sum -r 37158 9, 9180 B; `nm -u` still `autocon bcopy printf sptalloc`; relink
+TOTAL complaints 0; scan060 CLEAN (1064 / 1043 lines); `%sr` per function unchanged (enter 1/1,
+leave 1/1, complete 4/4).

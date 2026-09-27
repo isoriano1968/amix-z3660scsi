@@ -106,5 +106,6 @@ extern unsigned long  mock_autocon_base;
 extern unsigned short mock_vposr;
 extern unsigned long  mock_vposr_reads;
 extern unsigned long  mock_sptalloc_calls;
+extern int            mock_sptalloc_fail;   /* nonzero: sptalloc() fails */
 
 #endif

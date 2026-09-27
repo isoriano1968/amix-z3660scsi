@@ -36,7 +36,8 @@ extern int	z3660present();		/* sd.c probe hook (K&R decl) */
 
 /* stock-firmware hardening: which units the geometry fill skipped, and how
  * many console lines that produced (each unit is named once per boot) */
-extern unsigned long	z3660_skipmask, z3660_skip_msgs;
+extern unsigned long	z3660_skipmask, z3660_skip_msgs, z3660_skip_recovered;
+extern unsigned long	z3660_map_fails;
 static char	*g_probe_base;		/* board base z3660present() reports */
 
 /* ZS-02 detection state (driver) and the harness-only reset */
@@ -1186,6 +1187,69 @@ static void test_zs02_detection()
 	       "ZS-02 ConfigDev, answering: the deferred sweep ran once and named only the 6 empty units");
 }
 
+/* ====================================================================== */
+/* GATING: console truthfulness (A1, 2026-09-27).                          */
+/*                                                                         */
+/* A skip is not a mask, so a unit named "skipped" at attach that later    */
+/* answers with a drive must be re-named ("drive answering now") and drop  */
+/* out of z3660_skipmask.  A board whose mapping fails must not fail       */
+/* silently (the DL-08 ECS row saw EIO with no z3660 line at all).         */
+/* ====================================================================== */
+
+#define U_LATE	3		/* reads bs 0 at attach, a drive afterwards */
+
+static void test_console_truthful()
+{
+	uchar		cdb[10], buf[512];
+	unsigned long	msgs;
+	int		r;
+
+	printf("\n=== GATE: console truthfulness -- recovered skip, silent map failure ===\n");
+
+	mock_reset();
+	mock_add_drive( U_CD,   0x05, CD_BS, CD_NBLK, 128UL * CD_BS);
+	mock_add_drive( U_DISK, 0x00, DK_BS, DK_NBLK, 256UL * DK_BS);
+	mock_add_drive( U_LATE, 0x00, DK_BS, DK_NBLK, 64UL * DK_BS);
+	mock_set_geom( U_LATE, 0x00, 0UL, 0UL);		/* not answering at attach */
+	z3660_test_unmap();
+	z3660_cache = 0;
+	g_probe_base = 0;
+	r = z3660present( &g_probe_base);
+	printf("       attach    present=%d skipmask=0x%02lX skip_msgs=%lu recovered=%lu\n",
+	       r, z3660_skipmask, z3660_skip_msgs, z3660_skip_recovered);
+	CHECK( r == 1 && z3660_skipmask == 0xBE && z3660_skip_msgs == 6 && z3660_skip_recovered == 0,
+	       "A1: attach names unit 3 (bs 0) among the 6 skipped units");
+
+	mock_set_geom( U_LATE, 0x00, DK_BS, 64UL);		/* the drive answers now */
+	msgs = z3660_skip_msgs;
+	memset( cdb, 0, sizeof cdb); cdb[0] = 0x28; cdb[5] = 2; cdb[8] = 1;	/* READ(10) LBA 2 */
+	memset( buf, 0xEE, sizeof buf);
+	run_cmd( U_LATE, cdb, 10, buf, 512);
+	printf("       late unit status=0x%02X okay=%d skipmask=0x%02lX recovered=%lu\n",
+	       g_status, (int)g_okay, z3660_skipmask, z3660_skip_recovered);
+	CHECK( g_okay && g_status == 0 && memcmp( buf, mock_backing( U_LATE) + 2 * DK_BS, 512) == 0,
+	       "A1: the unit skipped at attach reads block 2 once it answers");
+	CHECK( z3660_skipmask == 0xB6 && z3660_skip_recovered == 1 && z3660_skip_msgs == msgs,
+	       "A1: its skip bit is withdrawn and the recovery is named once");
+	run_cmd( U_LATE, cdb, 10, buf, 512);
+	CHECK( g_okay && z3660_skip_recovered == 1,
+	       "A1: a cache hit afterwards names nothing again");
+
+	/* mapping failure: sptalloc arm, no VA -- counted (and printed once) per try */
+	mock_reset();
+	z3660_test_unmap();
+	z3660_cache = 0;
+	mock_autocon_base = 0x40000000UL;
+	mock_sptalloc_fail = 1;
+	r = z3660present( &g_probe_base);
+	CHECK( r == 0 && z3660_present == 0 && z3660_map_fails == 1 && mock_trips == 0,
+	       "A1: a mapping failure refuses the probe, is counted, and touches no mailbox");
+	memset( cdb, 0, sizeof cdb); cdb[0] = 0x28; cdb[8] = 1;
+	run_cmd( U_CD, cdb, 10, buf, 512);
+	CHECK( !g_okay && g_status == 0xff && z3660_map_fails == 2 && zs_no_doorbells(),
+	       "A1: a command re-tries the map, fails without a doorbell, still counted");
+}
+
 int main()
 {
 	mock_reset();
@@ -1226,6 +1290,7 @@ int main()
 
 	/* ZS-02 cells reset the mock (and so mock_div0): run them last */
 	test_zs02_detection();
+	test_console_truthful();
 
 	printf("\n=== GATING: %d passed, %d failed ===\n", g_pass, g_fail);
 	printf("=== STRETCH parity: %d match, %d deviation ===\n", s_match, s_dev);

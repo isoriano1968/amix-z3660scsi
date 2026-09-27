@@ -333,6 +333,7 @@ long	z3660_ci_enforce;	/* 0 = warn on a failed free-ride check, else refuse */
 /* attach-time capture + verdict (all kmem-readable; see docs/BLIZZARD-F3.md §7) */
 ulong	z3660_dtt0, z3660_dtt1, z3660_cacr;
 ulong	z3660_ci_ok;		/* 0 = not checked, 1 = free ride verified, 2 = FAILED */
+ulong	z3660_map_fails;	/* z3660map() mapping failures (ENOMEM)       */
 ulong	z3660_sptalloc_unsafe;	/* sptalloc arm taken with maintenance armed */
 
 #ifndef	HOST_TEST
@@ -480,8 +481,10 @@ ulong	lo, hi;			/* board window: lo inclusive, hi exclusive */
 		return 0;
 	}
 	z3660_ci_ok = 2;
-	printf( "z3660: cache-inhibit assertion FAILED (cache=%d cacr 0x%x)\n",
-		(int)z3660_cache, z3660_cacr);
+	/* say what happens next: the default carries on, it does not refuse */
+	printf( "z3660: cache-inhibit assertion FAILED (cache=%d cacr 0x%x), %s\n",
+		(int)z3660_cache, z3660_cacr,
+		z3660_ci_enforce ? "attach refused" : "not enforced, continuing");
 	return z3660_ci_enforce ? ENXIO : 0;
 }
 
@@ -837,6 +840,8 @@ z3660map()
 	}
 	if (regs == 0 || bounce == 0) {
 		regs = 0;		/* sptalloc failure, or a base of 0 */
+		if (z3660_map_fails++ == 0)	/* retried per command: say it once */
+			printf( "z3660: cannot map the board at 0x%x\n", (int)bp);
 		return ENOMEM;
 	}
 	unless (z3660_sig( 6)) {
@@ -1019,6 +1024,7 @@ static struct z3660_unitgeom	z3660_geom_absent = { 512, 0, 0x00, 0 };
  */
 ulong	z3660_skipmask;		/* bit n: unit n was skipped (and reported)   */
 ulong	z3660_skip_msgs;	/* console lines emitted by the skip path     */
+ulong	z3660_skip_recovered;	/* skipped units that later answered valid    */
 
 /* the only block sizes a real piscsi unit reports: 512 (disk) .. 2048 (CD) */
 static int
@@ -1077,6 +1083,18 @@ int	unit;
 	z3660_geom[unit].bs      = bs;
 	z3660_geom[unit].nblocks = nb;
 	z3660_geom[unit].valid   = 1;		/* unmapped units stay re-readable */
+	/*
+	 * A skip is not a mask: the unit is re-read on every command.  So when a
+	 * unit that was named "skipped" answers with a drive after all (the
+	 * emulator's sptalloc arm read zeros at attach, NOTES 2026-09-27), the
+	 * console says so and the skip bit is withdrawn -- z3660_skipmask then
+	 * names exactly the units that are skipped NOW.
+	 */
+	if (z3660_skipmask & (1UL << unit)) {
+		z3660_skipmask &= ~(1UL << unit);
+		z3660_skip_recovered++;
+		printf( "z3660: unit %d: drive answering now (skipped earlier)\n", unit);
+	}
 }
 
 static void
@@ -1140,6 +1158,8 @@ z3660_test_unmap()
 	z3660_sig_deferred = 0;
 	z3660_skipmask = 0;
 	z3660_skip_msgs = 0;
+	z3660_skip_recovered = 0;
+	z3660_map_fails = 0;
 	for (i = 0; i < Z3660_NUNITS; ++i) {
 		z3660_geom[i].bs = 512;
 		z3660_geom[i].nblocks = 0;

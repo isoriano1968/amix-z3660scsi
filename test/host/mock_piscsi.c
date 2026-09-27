@@ -166,6 +166,7 @@ unsigned long	paddr;
  * bounce.
  */
 unsigned long	mock_sptalloc_calls;
+int		mock_sptalloc_fail;	/* nonzero: sptalloc() returns 0 (no VA) */
 
 char *sptalloc( npages, flags, pfn, dummy)
 int		npages;
@@ -173,6 +174,8 @@ unsigned long	flags, pfn;
 int		dummy;
 {
 	mock_sptalloc_calls++;
+	if (mock_sptalloc_fail)
+		return (char *)0;
 	if (npages == 1)
 		return (char *)g_regs;
 	return (char *)g_bounce;
@@ -433,6 +436,7 @@ void mock_reset()
 	mock_vposr = 0x2300;
 	mock_vposr_reads = 0;
 	mock_sptalloc_calls = 0;
+	mock_sptalloc_fail = 0;
 	if (!g_bounce)
 		g_bounce = (unsigned char *)malloc( MOCK_BOUNCE);
 	memset( g_bounce, 0, MOCK_BOUNCE);
