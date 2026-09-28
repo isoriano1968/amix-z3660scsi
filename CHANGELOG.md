@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-28 — ZS-03: the machine gate reads the Agnus/Alice id low nibble
+
+z3660map() decides AGA by the low nibble of the VPOSR id (>= 2) instead of id >= 0x22, so NTSC ECS (0x30) is refused before the fixed window is touched. Found in the review of the contributed amix-gayle-ide driver (Emre Bastuz). Harness 169/0. Objects: z3660_040.o 277a5b53 (sum 58774), z3660_030.o b5946c83.
+
 ## 2026-09-27 — T-9 rebuild: spl masks and MMIO volatile restored; truthful console (18e7eb2, 16ca1a8)
 
 With gcc-cross-amix 7a1d727 the objects keep their spl masks again: z3660_leave restores the IPL and
