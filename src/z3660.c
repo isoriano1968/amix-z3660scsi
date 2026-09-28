@@ -813,7 +813,13 @@ z3660map()
 		return 0;
 	found = autocon( Z3660_PROD, 0, &base, &size);
 	unless (found) {
-		if (((RDVPOSR() >> 8) & 0x7F) < 0x22) {
+		/*
+		 * Agnus/Alice id = VPOSR bits 8..14: 0x00/0x10 OCS NTSC/PAL,
+		 * 0x20/0x30 ECS PAL/NTSC, 0x22/0x23/0x32/0x33 AGA Alice.
+		 * AGA is the LOW NIBBLE >= 2, not the whole id >= 0x22
+		 * (NTSC ECS 0x30 is not AGA).
+		 */
+		if ((((RDVPOSR() >> 8) & 0x7F) & 0x0F) < 2) {
 			z3660_present = 0;
 			return ENXIO;	/* ECS/OCS machine -- no Z3660 here */
 		}

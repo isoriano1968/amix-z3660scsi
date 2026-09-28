@@ -1161,6 +1161,27 @@ static void test_zs02_detection()
 	CHECK( r == 0 && mock_trips == 0 && mock_vposr_reads == 1,
 	       "ZS-02 ECS/OCS: refused by VPOSR with zero mailbox accesses");
 
+	/* 7b. ZS-03: the gate is the Agnus/Alice id LOW NIBBLE, not id >= 0x22 */
+	{
+		static unsigned short ids[8] = { 0x00, 0x10, 0x20, 0x30, 0x22, 0x23, 0x32, 0x33 };
+		char	m[160];
+		int	i, aga;
+
+		for (i = 0; i < 8; i++) {
+			aga = i >= 4;
+			r = zs_cell( 0UL, (unsigned short)(ids[i] << 8), MOCK_BUS_BOARD);
+			sprintf( m, aga
+			    ? "ZS-03 VPOSR id 0x%02X (AGA): proceeds to the fixed-window probe"
+			    : "ZS-03 VPOSR id 0x%02X (OCS/ECS): ENXIO before touching the window", ids[i]);
+			if (aga)
+				CHECK( r == 1 && mock_vposr_reads == 1 && mock_trips > 0
+				       && (unsigned long)g_probe_base == 0x10000000UL, m);
+			else
+				CHECK( r == 0 && mock_vposr_reads == 1 && mock_trips == 0
+				       && z3660_present == 0, m);
+		}
+	}
+
 	/* 8. ConfigDev first: autocon hit, mailbox reads all-zero at attach (the
 	 *    2026-09-27 emulator sptalloc-arm case), then starts answering. */
 	r = zs_cell( 0x40000000UL, (unsigned short)0x2300, MOCK_BUS_ZERO);

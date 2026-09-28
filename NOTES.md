@@ -1179,3 +1179,23 @@ with the T-9 flags: `z3660_040.o` sha256 `6c347e25…`, sum -r 10405 9, 9184 B; 
 `ca2ef1cb…`, sum -r 37158 9, 9180 B; `nm -u` still `autocon bcopy printf sptalloc`; relink
 TOTAL complaints 0; scan060 CLEAN (1064 / 1043 lines); `%sr` per function unchanged (enter 1/1,
 leave 1/1, complete 4/4).
+
+## 2026-09-28: ZS-03 — the VPOSR machine gate misread NTSC ECS as AGA
+
+**Defect.** `z3660map()` refused the fixed window when the Agnus/Alice id
+(`(VPOSR >> 8) & 0x7F`) was `< 0x22`. Ids: 0x00/0x10 OCS NTSC/PAL, 0x20/0x30 ECS PAL/NTSC,
+0x22/0x23/0x32/0x33 AGA Alice. NTSC ECS (0x30) passed as AGA and went on to probe the fixed
+combo window. AGA is the LOW NIBBLE >= 2; the gate now tests `(id & 0x0F) < 2`.
+
+**Found by** the amix-gayle-ide contributor's review (Emre Bastuz, hmlio/amix-gayle-ide,
+`ide.c` VPOSR gate). The same defect exists in amix-a4091's `support.c.patch` and in kerntools'
+W-D7 injector; those are fixed separately.
+
+**Evidence.** Harness cell 7b feeds ids 0x00/0x10/0x20/0x30 (ENXIO, zero mailbox accesses) and
+0x22/0x23/0x32/0x33 (fixed-window probe, attach). `make -C test/host check`: 169 passed, 0 failed,
+6/6 parity (was 161). Negative control: the old gate fails exactly id 0x30. `build/mkobj.sh zs03`:
+`z3660_040.o` sha256 `277a5b53…`, sum -r 58774 9, 9184 B; `z3660_030.o` `b5946c83…`, sum -r
+61702 9, 9180 B; gate is now `movew $DFF004; bfextu 20,4; cmpiw #1; bhi`. `nm -u` still
+`autocon bcopy printf sptalloc`; relink TOTAL complaints 0; scan060 CLEAN (1064 / 1043 lines);
+`%sr` per function unchanged (enter 1/1, leave 1/1, complete 4/4). kerntools re-pin from
+`6c347e25…` needed.
