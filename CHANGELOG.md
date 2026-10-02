@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-02 — ZS-04: a raw read of a CD unit returns EIO instead of overrunning memory (e072408)
+
+Stock dd.c addresses every unit in 512-byte units (count = b_bcount/512); on a 2048-byte CD unit the driver
+multiplied that count by the block size and asked the firmware for 4x the caller's buffer, which it wrote
+linearly over unrelated pages -- the A4000T raw-dd kernel hang, and the slice open's RDB scan was itself a
+1536-byte overrun. z3660queue() now refuses any READ/WRITE where blocks*bs > nbyte (status 0xFF, EIO) before
+the doorbell and counts it in z3660_short_n; cdfs and disk requests pass unchanged. Harness 184/0, scan060 CLEAN.
+
 ## 2026-09-28 — ZS-03: the machine gate reads the Agnus/Alice id low nibble
 
 z3660map() decides AGA by the low nibble of the VPOSR id (>= 2) instead of id >= 0x22, so NTSC ECS (0x30) is refused before the fixed window is touched. Found in the review of the contributed amix-gayle-ide driver (Emre Bastuz). Harness 169/0. Objects: z3660_040.o 277a5b53 (sum 58774), z3660_030.o b5946c83.
