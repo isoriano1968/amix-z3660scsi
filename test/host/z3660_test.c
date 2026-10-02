@@ -38,6 +38,7 @@ extern int	z3660present();		/* sd.c probe hook (K&R decl) */
  * many console lines that produced (each unit is named once per boot) */
 extern unsigned long	z3660_skipmask, z3660_skip_msgs, z3660_skip_recovered;
 extern unsigned long	z3660_map_fails;
+extern unsigned long	z3660_short_n;		/* ZS-04 refusals */
 static char	*g_probe_base;		/* board base z3660present() reports */
 
 /* ZS-02 detection state (driver) and the harness-only reset */
@@ -564,6 +565,75 @@ static void test_cd_write_rejected()
 	run_cmd( U_CD, cdb, 6, sense, 18);
 	CHECK( sense[2] == 0x07 && sense[12] == 0x27 && sense[13] == 0x00,
 	       "CD WRITE(6) sense == DATA PROTECT 07/27/00");
+}
+
+/*
+ * ZS-04: dd.c addresses EVERY unit in 512-byte units (alien/dd.c BSIZE 512:
+ * LBA = sdblkno, count = b_bcount/512, nbyte = b_bcount).  On a 2048-byte CD
+ * unit that CDB asks for blocks*2048 bytes into an nbyte buffer -- 4x the
+ * buffer -- and the firmware writes it LINEARLY from one physical page: the
+ * 2026-10-02 A4000T raw-dd kernel hang.  The driver must fail such a request
+ * (EIO via cp->okay FALSE) before any doorbell, and must not touch a byte
+ * past nbyte.  cdfs's shape (count in 2048 units, nbyte = count*2048) still
+ * reads.
+ */
+static void zs04_cell( name, lba, count, nbyte)
+const char	*name;
+unsigned long	lba, count;
+unsigned	nbyte;
+{
+	uchar		cdb[10], buf[16384];
+	unsigned long	db;
+	int		i, intact;
+	char		msg[160];
+
+	memset( cdb, 0, sizeof cdb); cdb[0] = 0x28;
+	cdb[2] = lba >> 24; cdb[3] = lba >> 16; cdb[4] = lba >> 8; cdb[5] = lba;
+	cdb[7] = count >> 8; cdb[8] = count;
+	memset( buf, 0xA5, sizeof buf);
+	db = mock_doorbells[U_CD];
+	run_cmd( U_CD, cdb, 10, buf, nbyte);
+	intact = 1;
+	for (i = 0; i < (int)sizeof buf; i++)
+		if (buf[i] != 0xA5) intact = 0;
+	printf("       %-34s status=0x%02X okay=%d doorbells=+%lu buffer %s\n",
+	       name, g_status, g_okay, mock_doorbells[U_CD] - db,
+	       intact ? "untouched" : "WRITTEN");
+	sprintf( msg, "ZS-04 %s: rejected (okay FALSE, status 0xFF)", name);
+	CHECK( !g_okay && g_status == 0xff, msg);
+	sprintf( msg, "ZS-04 %s: no doorbell", name);
+	CHECK( mock_doorbells[U_CD] == db, msg);
+	sprintf( msg, "ZS-04 %s: no byte of the buffer (or past it) written", name);
+	CHECK( intact, msg);
+}
+
+static void test_cd_dd_shape_rejected()
+{
+	uchar		cdb[10], buf[2048 + 64];
+	unsigned char	*back = mock_backing( U_CD);
+	int		i, tail;
+
+	printf("[GATE] ZS-04 CD-ROM: dd.c 512-unit CDBs are refused, never overrun\n");
+	/* (a) dd bs=2048 skip=16: LBA 64 (512 units), 4 x 512, nbyte 2048 */
+	zs04_cell( "(a) aligned 2048 B, dd shape", 64UL, 4UL, 2048);
+	/* (b) a 512-byte read (sdpartition's RDB scan, dd bs=512) */
+	zs04_cell( "(b) 512 B read of block 0", 0UL, 1UL, 512);
+	/* (c) an offset that is not a 2048 multiple: LBA 65 x 4 */
+	zs04_cell( "(c) unaligned offset, LBA 65 x 4", 65UL, 4UL, 2048);
+	/* a CD read of 8 KB, dd bs=8192: 16 x 512 */
+	zs04_cell( "(d) 8 KB dd shape, 16 x 512", 16UL, 16UL, 8192);
+	CHECK( z3660_short_n == 4, "ZS-04 z3660_short_n counts the four refusals");
+
+	/* cdfs's shape still reads, and stops exactly at nbyte */
+	memset( cdb, 0, sizeof cdb); cdb[0] = 0x28; cdb[5] = 16; cdb[8] = 1;
+	memset( buf, 0xA5, sizeof buf);
+	run_cmd( U_CD, cdb, 10, buf, 2048);
+	tail = 1;
+	for (i = 2048; i < (int)sizeof buf; i++)
+		if (buf[i] != 0xA5) tail = 0;
+	CHECK( g_okay && g_status == 0 && memcmp( buf, back + 16 * 2048, 2048) == 0,
+	       "ZS-04 cdfs shape: LBA 16 x 1, nbyte 2048 reads the block");
+	CHECK( tail, "ZS-04 cdfs shape: nothing written past nbyte");
 }
 
 /* ====================================================================== */
@@ -1285,6 +1355,7 @@ int main()
 	test_cd_read_capacity();
 	test_cd_read10();
 	test_cd_write_rejected();
+	test_cd_dd_shape_rejected();
 
 	test_disk_inquiry_frozen();
 	test_disk_read_capacity_frozen();

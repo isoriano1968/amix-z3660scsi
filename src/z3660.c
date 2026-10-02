@@ -334,6 +334,7 @@ long	z3660_ci_enforce;	/* 0 = warn on a failed free-ride check, else refuse */
 ulong	z3660_dtt0, z3660_dtt1, z3660_cacr;
 ulong	z3660_ci_ok;		/* 0 = not checked, 1 = free ride verified, 2 = FAILED */
 ulong	z3660_map_fails;	/* z3660map() mapping failures (ENOMEM)       */
+ulong	z3660_short_n;		/* READ/WRITE refused: blocks*bs > nbyte (ZS-04) */
 ulong	z3660_sptalloc_unsafe;	/* sptalloc arm taken with maintenance armed */
 
 #ifndef	HOST_TEST
@@ -1600,6 +1601,22 @@ struct sdcom	*cp;
 		/* nb == 0 means the firmware has no drive mapped at this unit --
 		 * it would silently no-op the I/O and we must NOT report GOOD. */
 		if (blocks == 0 || nb == 0 || !g->valid || (block + blocks) > nb) {
+			cp->status = 0xff; cp->okay = FALSE;
+			break;
+		}
+		/*
+		 * ZS-04: never transfer more than the caller's buffer holds.
+		 * dd.c counts in 512-byte units on EVERY unit (alien/dd.c BSIZE:
+		 * count = b_bcount/512, nbyte = b_bcount), so on a 2048-byte CD
+		 * its CDB asks for 4x nbyte, and the firmware writes that LINEARLY
+		 * from one physical page over unrelated frames -- the 2026-10-02
+		 * A4000T raw-dd kernel hang.  Its LBA is in 512 units too, so the
+		 * data would be wrong anyway: fail it (EIO), no doorbell.  cdfs
+		 * sends nbyte == blocks * 2048 and passes; disks (bs 512) pass
+		 * for every dd.c request, as before.
+		 */
+		if (blocks > (ulong)cp->nbyte / bs) {
+			z3660_short_n++;
 			cp->status = 0xff; cp->okay = FALSE;
 			break;
 		}
