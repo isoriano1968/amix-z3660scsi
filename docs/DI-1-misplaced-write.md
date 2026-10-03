@@ -1,11 +1,19 @@
 # DI-1 — one 2 KiB piece of an inode block misplaced on the Z3660 SCSI path
 
-**Analysis written 2026-10-03; §8 (state of the hunt) added 2026-10-03 evening. No driver code
-was changed for it.** Tags: **measured** (read off an image, a disassembly or a source line,
+**Analysis written 2026-10-03; §8 (state of the hunt) added 2026-10-03 evening; §9 (closing
+evidence) added 2026-10-04. No shipping driver code was changed for it; bd8d900 and d78ac7f are
+diagnostic cuts.** Tags: **measured** (read off an image, a disassembly or a source line,
 cited), **derived** (arithmetic over measured facts, shown), **assumed** (neither; the check that
 settles it is named).
 
 ## 1. Verdict
+
+> **2026-10-04: §9 closes the hunt and supersedes §8.8's ranking.** The kernel's retry and
+> error paths, the firmware's reset path and the host side are excluded, and the FTL candidate
+> is weakened. The only sufficient mechanism is the firmware's register-value race (item 3).
+> No load on a healthy bus reproduces it: 0 stale reads in ≈ 11.6 M register writes on the
+> A4000D. The single event sits in the 2026-10-01 A4092 fault-hunt sessions. No driver change
+> is owed (§9.8).
 
 > **2026-10-03 evening: §8 supersedes items 3 and 5.** The rig (§7, run as kerntools E34) and
 > metal have since cleared the kernel + driver request stream. The register race of item 3
@@ -181,6 +189,10 @@ The ranking below is the analysis as first written. **§8 supersedes it.** The e
 | #5–#8 (§4.5–4.8) | cache, bounce, completion FIFO, ZS-04 | refuted (unchanged); rig counters 0 (§8.2) |
 | new | host upload path | excluded (§8.6) |
 | **new #1** | the SD card's FTL after an unclean power-down | **ranked first**; the decisive probe is pending a scratch card (§8.8) |
+
+**2026-10-04: §9.8 replaces this table.** The register race is the only sufficient mechanism,
+not reproduced on a healthy bus. The SD-card FTL is weakened. The kernel's retry path, the
+completion-order shims and the firmware's reset path are excluded (§9.1, §9.2, §9.5).
 
 ### 4.1 #1 — register-value race on the mailbox's block register (Z3660 firmware/FPGA)
 
@@ -623,3 +635,198 @@ the A4000D's as-shipped arm (§8.4) tell them apart.
 - **Diagnostic only, added later on 10-03:** a driver-side fault knob for the rig's
   kernel-retry cells (REFUSE, or SHIFT the block register; −4 on the 3rd piece gives the §2.2
   picture). See `docs/FAULT-KNOB.md`. It is not a DI-1 fix and never ships.
+
+## 9. Closing evidence, 2026-10-04
+
+**Added 2026-10-04. Docs only; no driver code changed.** The sources are the workspace review
+board: `review/T-27-di1-misplaced-write-verdict.md` (the verdict, compiled 2026-10-04 00:20 and
+updated as the A4000D cell finished) and `review/P-15-release-1-0-work-plan.md` (row DI-1, rows
+O18–O20). As in §8, **measured** means measured by the named station and reported there; this
+repo did not re-run it unless a commit or file of this repo is named. **This section supersedes
+§8.8's ranking and closes the hunt from the driver's side.**
+
+**In one paragraph.** Source reading and experiment now agree: the kernel never pairs one
+piece's LBA with the next piece's data, on the normal path or on the error path. A driver-side
+fault knob on the rig produces DI-1's picture only when the block register is shifted. It also
+showed that the kernel writes every inode block twice per sync. On the A4000D every netdd
+torture arm stayed clean under RTG drawing and RAM load, with 0 stale register reads in about
+11.6 M register writes. The firmware's reset path is excluded and the FTL candidate is weakened.
+What remains is the firmware's register-value race: sufficient, structural, and not reproducible
+on a healthy bus. The one event happened during the 2026-10-01 A4092 fault-hunt sessions. No
+driver change is owed.
+
+### 9.1 The kernel cannot misplace a piece (port station)
+
+*(measured, by reading the shipping binary and the usl-svr42 source; P-15 row DI-1 and T-27,
+row "Kernel retry / completion-order shims")*
+- **No kernel path pairs piece k's LBA with piece k+1's data.**
+- **`buf_breakup`'s per-piece advance window has the opposite orientation.** The loop stores
+  `b_blkno` (@0x3d284) and then `b_addr` (@0x3d288). A request built between the two stores
+  would carry (piece k+1's LBA, piece k's address): disk piece k+1 ← memory piece k. DI-1 is
+  disk piece k ← memory piece k+1 (§4.2 derived the same orientation).
+- **Nothing can issue that header inside the window.** A header is reused only after `biodone`,
+  and the Z3660's completions are either synchronous or drained in `z3660_complete`.
+- **dd.c's retry path** (`ihandle` → `startio` with RETRY) rebuilds `com.addr` and the CDB from
+  the same head buf, so a retry re-sends a consistent pair. It is also unreachable on the Z3660
+  for data I/O: the driver never returns a status ≠ 0 with `okay` TRUE for a disk READ or WRITE.
+  *(This repo's reading of `src/z3660.c` agrees: the only okay-TRUE non-zero status is the
+  CD-ROM write's DATA PROTECT, which never reaches the medium. Every other refusal is status
+  0xff with `okay` FALSE.)*
+- **The dd completion-order shims** (`dd_issue_first`, `dd_startio_tail`; §3 step 4) only
+  reorder delivery. They neither build nor change an (LBA, address) pair.
+
+### 9.2 The rig fault-knob cells (kerntools E36/E36b/E36c)
+
+*(measured; kerntools d27e142, `rig/matrix.tsv` rows E36/E36b/E36c; recipe and host tools in
+`tmp/2026-10-03-di1-fault/`)*
+
+The kernel is the diagnostic chain KD060-Z-FK-c0-u6 (c9c6cb64): the shipping KD060-Z recipe
+plus this repo's d78ac7f. That object carries bd8d900's page-cross ring and the one-shot WRITE
+fault knob (`docs/FAULT-KNOB.md`). The D245 capture is on. The host creates
+`/var/tmp/di1x/f1..f64` and arms the knob on one piece of f33's 8 KiB inode block (L = 225920).
+It then rewrites the block (touch + sync) and checks the capture.
+
+| cell | knob | result |
+|---|---|---|
+| E36 | REFUSE on piece 2 (LBA L+4) | the faulted flush wrote piece 1 only. The refused piece reached no LBA, and pieces 3/4 of that pass were not issued. The next flush wrote all four pieces at their own LBAs. The D245 replay is exact (2763 writes) and the post image is clean. **The kernel error path never misplaces**, which confirms §9.1 by experiment. |
+| E36b | SHIFT −4 on piece 3 (LBA L+8) | piece 3's payload was written at L+4 (seq 5108): **DI-1's picture, in the write record**. A second flush of the same block 75 ms later rewrote all four pieces correctly, so the post image is healed. Replay exact (2766 writes). |
+| E36c | as E36b, single-inode touch; the damaged state reconstructed | the kernel still flushed the block twice, ~70 ms apart (seq 5111–5114 faulted, 5160–5163 healing). Replaying the capture through seq 5113 (verified exact) gives the disk right after the faulted write. Piece 2 equals piece 3 except later-stamped dinode times: **hdf0's picture exactly** (§2.2). |
+
+**New fact: the kernel flushes an inode block twice per sync**, about 70–75 ms apart and with
+identical content, even for a single `touch; sync` *(measured, E36b/E36c)*. Consequence
+*(derived)*: a stale-ADDR1 hit on the first flush heals itself at the second. Only a hit on a
+block's **last** write persists, so a persisting DI-1 is rarer than the raw race rate.
+
+**Detectors must compare time-masked** *(measured)*. The reconstructed piece 2 matches piece 3
+only with the dinode time fields masked, as in hdf0 (§2.2: the `ic_atime` bytes of three dinodes
+differ). An exact-copy detector misses it. kerntools' `di1sig.py`
+(`tmp/2026-10-03-di1/di1sig.py`) now compares exact and time-masked windows over allocated
+dinodes. It reports 1 finding on the reconstruction, 0 on the master, and 0 on every DI-1 rig
+image re-checked. installng's `tools/fsdupcheck.py` compares the block-pointer arrays (dinode
+bytes 40–99), so it is time-insensitive. Its self-test for a re-stamped copy is installng
+6d30d96. **The 167-image prevalence sweep (5eae517) stands at 1 positive**, the A4000D pull.
+
+### 9.3 Metal, A4000D: every torture arm clean (Bench)
+
+*(measured; T-27 open items and P-15 row DI-1; diagnostic firmware F583F05B = Z3660
+`diag-regrace` 61bb936)*
+
+The setup is §8.4's: bench OS preset 6, RTG on with rtgload drawing 1024×768×16, RAMLOAD,
+scratch unit 2, netdd 0.4 TORTURE (every sector tagged, two read-backs). hdf0's file on the card
+was contiguous (46 × "[FASTSEEK 6] … 1 fragment").
+
+| arm | requests per pass | mode | read-back |
+|---|---:|---|---|
+| A, back-to-back 2 KiB | 102,396 | masked, 4 passes (first boot) | 409,584 sectors ok per pass |
+| A | 102,396 | as shipped (`RGR`), 4 passes | 409,584 ok per pass, both read-backs |
+| Q, SendIO-queued 2 KiB | 102,396 | as shipped | 409,584 ok |
+| R, random-order 2 KiB | 102,396 | as shipped | 409,584 ok |
+| B, 8 KiB | 25,599 | as shipped | 409,584 ok |
+| C, 64 KiB | 3,200 | as shipped | 409,584 ok |
+
+- **Every read-back: 0 misplaced, 0 stale, 0 corrupt.**
+- **[REGRACE]: 0 stale first reads** in 4,165,877 register writes (first boot) plus 7,445,677
+  (second boot), so 11,611,554 ≈ **11.6 M piscsi register writes** across both boots (the sum
+  is derived).
+- **No 060 freeze on the A4000D.** There was one ping miss during arm R while the firmware kept
+  logging. The halt was clean, 16 s before the power cut.
+
+*(derived)* That is 12 passes × 409,584 sectors written and read back, with 1,023,960 of the
+writes as 2 KiB requests (A ×8, Q, R). The counter compares both reads in either mode, so arm A
+masked already showed that the race did not happen. The as-shipped arms test the consequence
+directly: a misplaced piece would carry the previous request's tag. None did.
+
+### 9.4 Metal, A4000T: unloaded clean, loaded untestable (Z3660 station)
+
+*(measured; §8.5, T-26 addenda 3–4)* On the shipped firmware 719AF9B7 with RTG off, one full
+arm-A pass was clean: 409,584 of 409,584 sectors. With RTG drawing, piscsi I/O froze the 060
+before the first write (T-26), so the loaded case cannot be tested on that box. T-26 owns the
+freeze.
+
+### 9.5 The firmware's reset path is excluded (Z3660 station)
+
+*(measured, by reading the fork firmware; P-15 row DI-1, 23:55)*
+- **Writes are atomic in the cooperative core0 loop.** A WRITE's `f_lseek` and its one
+  `f_write` complete before `reset_thread` runs (`scsi.c`:1530–1663). The reset interrupt only
+  sets a flag (`interrupt.c`:68–80; `main.c`:711–738).
+- **No doorbell follows a real-060 reset.** The registers persist, but the 060 is held in CPLD
+  reset (T-25).
+- **"Refreshed drives" only reads.** It re-parses the RDBs: no close, no sync, no CLMT rebuild,
+  no writes.
+
+So a reset inside a run of four 2 KiB writes cannot split or re-aim one of them in the firmware.
+
+### 9.6 When it happened (Bench serial audit; kerntools)
+
+*(measured)*
+- hdf0 (k1-desktop-rtg.hdf) arrived in the sha256-verified 2026-10-01 card write (27 of 27
+  files verified). It was **never uploaded over HTTP**: the 10-02 "deploys" were dry runs of
+  other files (§8.6 and the Bench's serial audit).
+- The only abrupt stops after writes to hdf0 are two **unlogged** sessions on 2026-10-01, at
+  **17:12** and **17:18**, during the A4092 card-1 fault hunt. A defective Zorro III bus-master
+  card in the slot held the bus. Amix was reset ("Reset active (DOWN)" + "Refreshed drives")
+  2–12 s after hdf0 writes, with no I/O after it. Power was cut about 1 minute later. Every
+  later session halted cleanly.
+- T-27 dates the damaged copy before the 10-02 boots (`ic_atime` stamps).
+
+**Amends §2.3.** §2.3's dating stands: the copy was on disk before box 08:48:02 of the 10-03
+session. Its last bullet placed the event in or after the 10-02 20:47 session, on an *assumed*
+box-clock-to-session mapping. The serial audit and T-27's dating supersede that placement. This
+repo did not re-derive the box-clock mapping.
+
+### 9.7 The SD-card FTL variant is weakened
+
+*(derived from §9.6)* §8.8's mechanism needs a power loss while the card is still committing
+writes it has acknowledged. In both 10-01 stops the card stayed powered for about a minute after
+the reset. Every later session halted cleanly. So the FTL is no longer ranked first. It is not
+excluded either, because the FTL is not observable.
+
+**Pending** (Z3660 station, §8.8):
+- probe a: 5× CRC re-read of the damaged hdf (stable = a persisted mis-mapping; varying = a
+  failing card);
+- probe b: a fresh 200 MB pattern file, 10 CRC re-reads over an hour, and one power cycle with
+  no writes.
+
+Probes c (the card's CID) and d (the scratch-card power-cut series, P-15 O19) stay as listed in
+§8.8.
+
+### 9.8 Conclusion
+
+- **The sufficient mechanism is the firmware's register-value race** (§4.1: a stale
+  `WRITE_ADDR1` on the third request). It is structural and real: the FPGA raises the ARM event
+  in the same clock as it starts the AXI write of the value (z3660.v:713–716 against
+  :1249–1265). The fixes belong to the Z3660 repo. The real fix is in the FPGA (raise the event
+  after `bvalid`, on the deferred bitstream list). The stopgap is the firmware re-read until two
+  reads agree. Both sit in P-14 PR candidate 8; the re-read exists only on `diag-regrace`, not
+  in the shipped fork firmware.
+- **It is not reproducible on a healthy bus** under any load we can generate. On the A4000D it
+  gave 0 stale first reads in ≈ 11.6 M register writes and 0 misplaced sectors in every arm
+  (§9.3). The A4000T was clean at RTG off (§9.4). The rig was clean too (§8.2), but its mailbox
+  is synchronous by value.
+- **The single event sits in the abnormal-bus environment** of the 2026-10-01 A4092 card-1 fault
+  hunt (§9.6).
+- **No driver change is owed.** A page split is impossible in the driver (§6.2), and a register
+  read-back cannot prove the ARM's view (§8.10). §6.1 is not pursued.
+- **The shipping z3660scsi object stays e072408 (ZS-04).** The DI-1 kernel b9cee294 carries the
+  older 53f43bd (§3); DI-1 gives no reason to change either. This repo's bd8d900 (page-cross
+  ring) and d78ac7f (fault knob) are diagnostic cuts only and never ship.
+- Whether this clears DI-1 as a freeze blocker is the owner's decision (P-15 O20).
+
+**Final status of every candidate** (replaces the table in §4 and the ranking in §8.8):
+
+| mechanism | final status | where |
+|---|---|---|
+| register-value race on the mailbox (firmware/FPGA) | **the only sufficient mechanism**; not reproduced on a healthy bus | §4.1, §8.4, §9.3, §9.4 |
+| kernel request stream, retry path, completion-order shims | excluded (source and rig) | §8.1, §8.2, §9.1, §9.2 |
+| page crossing in `z3660_rw` | refuted, measured 0; census E35 `dcn_kv_scat` 0 over 132,231 requests (kerntools 5de893b) | §4.4, §8.3, §8.4 |
+| cache, bounce, completion FIFO, ZS-04 | refuted | §4.5–4.8 |
+| stale file pointer, FatFs | excluded | §8.7 |
+| host upload path | excluded | §8.6 |
+| firmware reset path | excluded | §9.5 |
+| SD-card FTL after a power cut | weakened; probes a/b pending | §8.8, §9.7 |
+
+**What changes in §1–§8.** §1 item 3 stands as the only sufficient mechanism, with the rider
+that it does not reproduce on a healthy bus. §1 item 5's metal step is done (§9.3). §2.3's
+placement of the event is superseded (§9.6). Any prevalence detector built on §4.1's predictions
+must compare time-masked dinodes or block pointers (§9.2). §8.8's FTL ranking drops to weakened
+(§9.7).
