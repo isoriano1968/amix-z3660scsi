@@ -1,10 +1,17 @@
 # DI-1 — one 2 KiB piece of an inode block misplaced on the Z3660 SCSI path
 
-**Analysis written 2026-10-03. No driver code was changed for it.** Tags: **measured** (read
-off an image, a disassembly or a source line, cited), **derived** (arithmetic over measured
-facts, shown), **assumed** (neither; the check that settles it is named).
+**Analysis written 2026-10-03; §8 (state of the hunt) added 2026-10-03 evening. No driver code
+was changed for it.** Tags: **measured** (read off an image, a disassembly or a source line,
+cited), **derived** (arithmetic over measured facts, shown), **assumed** (neither; the check that
+settles it is named).
 
 ## 1. Verdict
+
+> **2026-10-03 evening: §8 supersedes items 3 and 5.** The rig (§7, run as kerntools E34) and
+> metal have since cleared the kernel + driver request stream. The register race of item 3
+> measured 0 stale reads in 4,165,877 register writes under load and drops to #2. The #1
+> candidate is now the SD card's flash translation layer after an unclean power-down (§8.8).
+> Items 2 and 4 stand, now also measured (§8.1–8.4).
 
 1. **The damage is one 2048-byte request's worth of data at the wrong LBA, and it was on the
    disk before the last session booted.** The piece at +2048 of the inode block for inodes
@@ -162,6 +169,18 @@ The port station's reading ("ddstrategy queues the buf whole → one 16-block re
 steps 1–3. On this kernel the block path and the raw path both issue 2 KiB requests.
 
 ## 4. Ranked mechanisms
+
+The ranking below is the analysis as first written. **§8 supersedes it.** The evening status:
+
+| rank (first written) | mechanism | 2026-10-03 evening (§8) |
+|---|---|---|
+| #1 (§4.1) | register-value race on the mailbox (firmware/FPGA) | **#2**: structural and real, but 0 stale first reads in 4,165,877 register writes under RTG + RAM load on the A4000D; the as-shipped arm is pending (§8.4, §8.8) |
+| #2 (§4.2) | kernel pairs one chunk's LBA with another's address | cleared on the rig: replay byte for byte, every sector carries its own tag (§8.2) |
+| #3 (§4.3) | stale file pointer after a failed `f_lseek` | excluded: 0 SCSI ERROR/refused hits in every hdf0 serial segment, PSTAT err=0; FatFs excluded by reading (§8.7) |
+| #4 (§4.4) | page crossing in `z3660_rw` | refuted, now measured: 0→0 on the rig and on metal; the -CD build's 11 are RDB reads, harmless (§8.3, §8.4) |
+| #5–#8 (§4.5–4.8) | cache, bounce, completion FIFO, ZS-04 | refuted (unchanged); rig counters 0 (§8.2) |
+| new | host upload path | excluded (§8.6) |
+| **new #1** | the SD card's FTL after an unclean power-down | **ranked first**; the decisive probe is pending a scratch card (§8.8) |
 
 ### 4.1 #1 — register-value race on the mailbox's block register (Z3660 firmware/FPGA)
 
@@ -340,6 +359,8 @@ issuer, and on this kernel it does for every buf above 4096 B (§3). The remaini
 
 ## 7. Recommended first experiment — the rig, shipping kernel, D245 capture
 
+**Run 2026-10-03 as kerntools row E34 (792cdd8): clean. Results in §8.2.**
+
 **Goal.** Prove or convict the kernel + driver request stream (§4.2/4.4/4.6/4.7) byte for byte,
 with the instrument that will later read metal. The amiberry mailbox applies register writes by
 value and runs the doorbell synchronously (`src/z3660_scsi.cpp` ~397). **A clean rig therefore
@@ -392,3 +413,210 @@ pairs on this path. Run the identical guest script on the A4000D with the Z3660 
 regrace firmware: REGRACE lines plus tag mismatches there decide #1. Any rig mismatch → the
 capture names the exact request (sequence number, LBA, length, payload), and the hunt moves to
 the kernel (port) or this driver accordingly.
+
+## 8. State of the hunt, 2026-10-03 evening
+
+**Added 2026-10-03 evening. Docs only; no driver code changed.** The sources are station reports
+on P-15 (the workspace review board, `review/P-15-release-1-0-work-plan.md`, row DI-1 and rows
+O18/O19) and T-26 addenda 3–4. Each point names the station and, where one exists, the commit.
+In this section **measured** means measured by the named station and reported there; this repo
+did not re-run it. **This section supersedes §1 items 3 and 5 and the ranking in §4.**
+
+**In one paragraph.** The kernel splits every block-path metadata write into four 2 KiB requests,
+confirmed by the port against the source. The rig replays the kernel + driver request stream
+byte for byte on both kernels, so DI-1 is below the driver. On metal the driver's page-cross
+counter stays at 0, and the register race of §4.1 did not occur once in 4,165,877 register
+writes under the heaviest A4000D load. The host upload path and FatFs are excluded. The #1
+candidate is now the SD card's flash translation layer (FTL) after an unclean power-down. The
+decisive probe needs a scratch card.
+
+### 8.1 The kernel breakup is confirmed (§3)
+
+The port station confirmed §3 against the usl-svr42 source (`predki.c`, `bio.c`; port 22e565e,
+DRIVER-LINE-5 amended) *(measured)*:
+- `fix_swtbls` installs `gen_strategy` on dd (`d_flag` = `nullflag`);
+- a buf of ≤ 4096 B passes whole;
+- `buf_breakup` sends the first piece to the page edge (converted). Every later piece is
+  `min(resid, 0x800)`, unconverted, at `.text` 0x3d21e;
+- on a page-aligned 8 KiB buffer the first piece would be a whole 4096 B page, so it is skipped
+  and the 2 KiB loop starts at the beginning: exactly **four 2 KiB requests**.
+
+So **every block-path metadata write is four back-to-back 2 KiB requests at consecutive LBAs**.
+DI-1's exposure needs no raw writer. That matches the Bench: no repairing fsck in 522 OCR'd
+console frames, and no raw writer in any hdf0 session. The port's earlier one-request reading
+(§3, last paragraph) is withdrawn by the port. Its 1.1 note: 0x800 → 0x1000 at 0x3d21e halves
+the requests (each still inside one page); the raw `amiga_dma_pageio` pair changes only together
+with a page-aligned `ngeteblk(4096)`.
+
+### 8.2 The rig: the request stream is consistent (§7 run)
+
+kerntools 792cdd8, rows E32/E32b/E33/E33b/E34, on the shipping KD060-Z b9cee294 and on
+KD060-Z-CD 94fbb4fd *(measured)*:
+
+| row | run | result |
+|---|---|---|
+| E32 / E32b | metadata torture, 12,000 files, 26 min per kernel | 0 DI-1 signatures, 0 DUP fragments |
+| E33 / E33b | raw path, tagged patterns, bs 8k and 2k | 4096/4096 pieces correct |
+| E34 | §7 as written: D245 capture, 48 MiB tagged scratch, 512-file churn | the write-log replay reproduces the post images byte for byte; all 57,344 scratch writes were 2 KiB requests; every sector carries its own LBA's tag |
+| all | §5 counters, in-run | 0 (`z3660_pagecross_n` 0→0 on the shipping kernel; 11→11 boot-time on -CD, §8.3) |
+
+**Reading.** The kernel + driver request stream is consistent on both kernels, for the block and
+the raw path: every 2 KiB request lands with its own tag. §4.2 (LBA/address pairing), §4.4, §4.6
+and §4.7 are now cleared by measurement, not only by reading, and §4.2's residual (buffer
+aliasing) did not show. As §7 said, the rig's mailbox is synchronous by value. This result moves
+DI-1 **below the driver** on the rig. It says nothing about the firmware race or the card.
+
+### 8.3 The page-cross counter question is closed
+
+- **The 11 boot-time crossings on KD060-Z-CD** are exactly the 11 × 512 B RDB reads (4 + 3 + 4
+  per window) into `getrdb()`'s static `block` *(measured: port verdict by arithmetic on
+  kerntools' windows, `tmp/2026-10-03-di1-pagecross/`)*. cdfs's growth moved that buffer to page
+  offset 0xE24 (VA 0x08136E24). On the shipping kernel it sits at 0x63C and does not cross.
+  Below 0x40000000 is the DTT0 identity region (`vtop040` returns phys == va), so the two
+  "pages" are consecutive physical memory and the transfer is correct. The counter is pure `pa`
+  arithmetic, so this is **counter noise from layout**. No fragment read and no 4 KiB transfer
+  crossed. No 1.0 fix; the 1.1 cleanup is to 512-align `block`.
+- **Refinement of §4.4 and §6.2.** A crossing is a hazard only for a buffer at VA ≥ 0x40000000
+  (kvseg) whose second page is not the next frame. The pa-only `z3660_pagecross_n` cannot make
+  that distinction. The port's allocator argument (usl-svr42 `bio.c`:456 `kmem_zalloc` and the
+  SVR4.0 buddy kma: a buffer of ≤ 4096 B is size-aligned inside one page) says no fragment or
+  4 KiB buffer can straddle. So the offset-aware `gen_strategy` test of §6.2 is not a 1.0 item.
+- **Census.** A bench-only census pass exists in the port (b2b9732 `ddcensus`, never shipped).
+  dd `startio`'s `vtop` goes through `dd_vtop_census`, which counts identity crossers
+  (`dcn_cross_id`), kvseg crossers (`dcn_cross_kv`) and **`dcn_kv_scat`, the real hazard** (a
+  kvseg crosser whose second page is not the next frame), with a 16-entry ring. `dcn_kv_scat`
+  is 0 so far; kerntools runs the diagnostic chain over the matrix for the measured statement.
+  This repo's `z3660_pagecross_ring` (bd8d900, `docs/PAGECROSS-RING.md`) is in that diagnostic
+  chain. Neither ships.
+
+### 8.4 Metal, A4000D (Bench)
+
+*(measured)*
+- **Page-cross counter.** `z3660_pagecross_n` 0 → 0 across a 6-cycle metadata torture (6,018
+  files, `fsck -n` clean) on the shipping kernel (hdf6, r3 desktop). The driver page-cross is
+  excluded on metal too.
+- **Regrace cell (interim).** The diagnostic firmware F583F05B (Z3660 `diag-regrace` 61bb936)
+  carries a per-register stale-read counter: it logs the first and the second read of every
+  register write, keeps a heartbeat, and has a console `RGR` toggle between the masked and the
+  as-shipped value. Setup: bench OS preset 6, RTG on with rtgload drawing 1024×768×16 (28,048
+  frames/h) plus RAMLOAD, scratch unit 2, netdd 0.4 arm A (back-to-back 2 KiB writes, every
+  sector tagged). Results:
+  - **0 stale first reads in 4,165,877 SCSI register writes**;
+  - four masked passes of 102,396 back-to-back 2 KiB writes: 409,584 sectors ok each,
+    **0 misplaced**, 0 stale, 0 corrupt;
+  - PSTAT short=0 err=0.
+- **Pending:** arm A as shipped (`RGR`), and arms Q (queued), R (random), B (8 KiB) and C
+  (64 KiB). The Bench's reading: if those stay at zero, the race is not DI-1's cause.
+
+*(derived)* The counter compares the two reads in either mode, so "0 stale first reads" means
+the race never happened in those passes; masking had nothing to mask. The as-shipped arm tests
+the consequence directly: a misplaced piece would carry the previous request's tag.
+
+### 8.5 Metal, A4000T (Z3660 station)
+
+*(measured; T-26 addenda 3 and 4)*
+- Shipped firmware 719AF9B7, bench OS + RAMLOAD, **RTG off**: one full arm-A pass (102,396
+  back-to-back 2 KiB writes) was **CLEAN**: 409,584/409,584 sectors, misplaced 0, stale 0,
+  corrupt 0, no tag missing (image A07223DA).
+- **RTG on** (rtgload 1024×768×16 at ~74 fps + RAMLOAD): the 060 froze **before the first write**
+  reached the firmware. This is the T-26 class: on that box RTG drawing plus piscsi I/O freezes
+  the 060 at once on the shipped firmware, while RTG off survives 100k requests. The loaded case
+  is untestable there, and the A4000T is closed for DI-1 (card == master, box off).
+- T-26 addendum 3 suggests the freeze sits on the same register/bus handshake as the race, if it
+  holds over more samples (N=1 per arm). Open; T-26 owns it.
+
+### 8.6 Host side excluded (kerntools)
+
+*(measured, by reading the tools and the firmware)*
+- Scripted uploads (`deploy-image-kvm.sh`, `deploy-kvm.sh`) are gated on device CRC == host
+  CRC before any swap. The firmware's CRC command re-reads the file from the SD
+  (`sd_fileops.c`:351–412).
+- `http_upload` is one sequential `curl -T` PUT. The firmware handler `f_write`s the pbufs in TCP
+  order with no seek (`lwip/httpd.c`:383–407).
+- **hdf0 (k1-desktop-rtg.hdf) was never uploaded to D-DEV.** It arrived in the sha256-verified
+  2026-10-01 card write (`make-card.sh`: rsync, sync, unmount, remount read-only, then sha256 of
+  every file against the MANIFEST).
+
+So **the damage happened on the card after 2026-10-01**: through an Amix session on the
+firmware's FatFs write path, or in the SD card itself.
+
+### 8.7 FatFs excluded (Z3660 station)
+
+*(measured, by reading ff.c R0.15)* `csect` is recomputed from `fptr` per sector. The cluster is
+re-resolved from the CLMT at every boundary. Direct writes are clipped at the cluster edge, and
+the refill touches only the FIL buffer. The 2026-08 CLMT truncation bug is fixed on
+`amix-main-2`, which is in 719AF9B7. Every hdf on the card today is 1 fragment. With the Bench's
+serial logs (0 "SCSI ERROR"/refused/bad-write hits in every hdf0 segment, every PSTAT short=0
+err=0), this also closes §4.3 (a stale file pointer after a failed `f_lseek`).
+
+### 8.8 New #1 candidate: the SD card's FTL after an unclean power-down
+
+*(the ranking is the Z3660 station's; the FTL itself is not observable, so the mechanism stays
+assumed until probe d)*
+
+**Mechanism.** A consumer SD card's FTL maps logical ranges to physical flash pages. If power is
+cut while the card is still committing writes it has already acknowledged, the map can end up
+with one logical 2 KiB range pointing at the physical page that holds a **newer write of the
+neighbouring range**. Reading the logical range then returns the neighbour's data. The firmware
+issues no flush or "wait until committed" step after its writes, and the bench cut power seconds
+after the halt banner. D-DEV has had many hard power-offs. A clean halt protects the filesystem,
+not the card's FTL.
+
+**Ranking now** (Z3660 station, 22:30):
+1. the SD card's FTL after an unclean power-down;
+2. the register race of §4.1. It remains a real structural defect: the FPGA raises the ARM event
+   in the same clock as it starts the AXI write of the value (z3660.v:713–716 against
+   :1249–1265), and the fix belongs to the FPGA (event after `bvalid`). But it measured 0 in
+   4.17 M register writes under load (§8.4);
+3. FatFs: excluded (§8.7).
+
+**Probes** (Z3660 station):
+- a. 5× CRC re-read of the damaged hdf: stable = a persisted mis-mapping; varying = a failing
+  card;
+- b. a fresh 200 MB pattern file, 10 CRC re-reads over an hour, and one power cycle with no
+  writes;
+- c. the card's CID, manufacturer and date from a host reader when the card is out;
+- d. **decisive**, on a **scratch SD card only**: write load, then a power cut a few seconds
+  after the halt, ×10, host-checked each time. Pending the owner's card (P-15 O19).
+
+**Bench rule now:** ≥ 10 s between the halt banner and any power cut, on both benches.
+
+### 8.9 The dating in §2.3 fits an FTL fault as well (derived)
+
+§2.3 found that the damaged piece is the **master's** +4096 bytes, with only the atimes of inode
+numbers 6675–6677 restamped by the 10-03 session. It is not a "newer in-core copy". The copy was
+on disk before box 08:48:02 on 10-03, and the 10-03 session's own writes of the block were
+correct.
+
+That reading needs no in-core source, so it fits an FTL mapping fault as well as the register
+race:
+- Piece 3 (+4096, inodes 6688–6703, the bk* tools) is byte-identical to the master in the
+  damaged image (§2.2), so every write of it, in the 10-02 20:47→20:50 session too, carried
+  master bytes. A mis-map of logical +2048 onto the physical page of such a write gives exactly
+  "+2048 = master +4096, +4096 correct", with nothing else changed.
+- The window fits too: after that session's last write of the block (its halt flush) and before
+  the 10-03 boot read it. A power cut seconds after that halt is the FTL event. *(assumed: the
+  power-cut timing after that halt; the POWER-LOG settles it.)*
+- After the fault, the 10-03 session read the wrong piece, stamped three atimes on it, and wrote
+  the block back as four correct 2 KiB requests, which the card stored correctly.
+
+Both mechanisms give the same image. They differ in when the fault happens (the race: during a
+write, under load; the FTL: at a power loss after acknowledged writes). The prevalence sweep
+(installng 5eae517: 1 positive out of 167 images, the A4000D pull only) fits both. Probe d and
+the A4000D's as-shipped arm (§8.4) tell them apart.
+
+### 8.10 What changes in §1–§7
+
+- §1 items 2 and 4 stand, now also measured (§8.1–8.4). Item 3: the race drops to #2. Item 5:
+  the rig step is done (§8.2) and the metal step is under way (§8.4).
+- §4.1, "which firmware": D-DEV ran the fork's 719AF9B7 during the 10-02 20:47 session ("1.03
+  BETA 21" is the fork's banner too; Z3660 station). `regrace_check` exists only on the
+  `diag-regrace` branch (f1e8f40, 61bb936), which never lands. So nothing masked the race on
+  D-DEV.
+- §6.1: the Z3660 station holds that a driver read-back goes through the FPGA read path, not the
+  ARM's DDR view, so it cannot prove what the ARM latched (P-15 O18: "no driver mitigation
+  exists"). This contradicts §6.1's reading of `scsi.c` @2092–2096 and is unresolved. It is not
+  pursued while the race measures zero.
+- §6.2: the ring was added (bd8d900). The issuer-side `gen_strategy` test is not a 1.0 item
+  (§8.3).
+- **No driver change is owed for DI-1 as of this evening.**
