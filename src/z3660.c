@@ -519,6 +519,75 @@ ulong	z3660_bounce_rd_n;			/* READ came back via the bounce       */
 ulong	z3660_pagecross_n;			/* chunks spanning a page boundary     */
 ulong	z3660_range_ovf;			/* impossible range refused            */
 
+/*
+ * PAGE-CROSS RING (DI-1 diagnostic, read-only).  z3660_pagecross_n says HOW MANY
+ * chunks crossed a page edge; this says WHICH.  Every crossing the census counts
+ * is also copied into a 16-entry ring that a running kernel exposes to
+ * kmemdump / adb / READ_MEM.  Recording only: the transfer that follows is
+ * byte-for-byte the one it always was, and nothing here ever reads the ring.
+ *
+ * Fixed layout, every field a 32-bit big-endian ulong (offsets asserted below
+ * for the kernel; decode recipe in NOTES.md and docs/PAGECROSS-RING.md):
+ *
+ *   z3660_pagecross_ring   +0          magic 0x5A504352 "ZPCR" (initialized data)
+ *                          +4 + 32*i   entry i, i = 0..15:
+ *     +0  seq     z3660_pagecross_n just after this crossing (1, 2, ...);
+ *                 0 = slot never written
+ *     +4  flags   bit 0: 1 = WRITE (TO_DEVICE), 0 = READ
+ *     +8  unit    piscsi unit
+ *     +12 block   LBA of THIS chunk, in the unit's blocks
+ *     +16 len     bytes of this chunk
+ *     +20 pa      physical start of this chunk (handed to the firmware as *_ADDR3)
+ *     +24 req     cp->addr: the start of the whole request as the caller handed
+ *                 it.  The caller's kernel VA is NOT visible here -- startio()
+ *                 vtop()s before z3660queue() runs and this driver is forbidden to
+ *                 translate back -- so this is the physical request base; pa-req
+ *                 is the chunk's offset inside the request.
+ *     +28 reqlen  bytes of the whole request (blocks * bs)
+ *
+ *   z3660_pagecross_ring_idx   the slot the NEXT crossing will take (0..15); the
+ *                 newest entry is (idx - 1) & 15.  Slots wrap; seq orders them.
+ */
+#define	Z3660_PCR_N	16			/* ring entries (power of two) */
+#define	Z3660_PCR_MAGIC	0x5A504352		/* "ZPCR" */
+#define	Z3660_PCR_WRITE	0x1			/* flags bit 0 */
+
+struct z3660_pcent {
+	ulong	seq, flags, unit, block, len, pa, req, reqlen;
+};
+struct z3660_pcring {
+	ulong			magic;
+	struct z3660_pcent	e[Z3660_PCR_N];
+};
+struct z3660_pcring	z3660_pagecross_ring = { Z3660_PCR_MAGIC };
+ulong	z3660_pagecross_ring_idx;		/* next slot to write, 0..15   */
+
+#ifndef	HOST_TEST
+/* the documented offsets ARE the layout: 4 + 16 * 32 bytes, no padding */
+typedef char	z3660_pcr_layout_check[
+	(sizeof (struct z3660_pcent) == 32 &&
+	 sizeof (struct z3660_pcring) == 4 + Z3660_PCR_N * 32) ? 1 : -1];
+#endif
+
+static void
+z3660_pcr_note( unit, write, block, len, pa, req, reqlen)
+int	unit, write;
+ulong	block, len, pa, req, reqlen;
+{
+	struct z3660_pcent	*e;
+
+	e = &z3660_pagecross_ring.e[z3660_pagecross_ring_idx & (Z3660_PCR_N - 1)];
+	e->flags  = write ? Z3660_PCR_WRITE : 0;
+	e->unit   = (ulong)unit;
+	e->block  = block;
+	e->len    = len;
+	e->pa     = pa;
+	e->req    = req;
+	e->reqlen = reqlen;
+	e->seq    = z3660_pagecross_n;		/* last: a non-zero seq = complete */
+	z3660_pagecross_ring_idx = (z3660_pagecross_ring_idx + 1) & (Z3660_PCR_N - 1);
+}
+
 #ifndef	HOST_TEST
 #define	Z3660_CPUSHL(p)	__asm__ __volatile__( ".word 0xf468" : : "a" (p) : "memory")
 #define	Z3660_CINVL(p)	__asm__ __volatile__( ".word 0xf448" : : "a" (p) : "memory")
@@ -1186,8 +1255,10 @@ int	unit, write;
 ulong	block, blocks, bs;
 uchar	*data;
 {
-	ulong	chunk, len, i, perchunk, pa;
+	ulong	chunk, len, i, perchunk, pa, req, reqlen;
 
+	req    = (ulong)data;			/* page-cross ring context only */
+	reqlen = blocks * bs;
 	perchunk = MAXXFER / bs;
 	if (perchunk == 0)
 		perchunk = 1;
@@ -1213,10 +1284,14 @@ uchar	*data;
 		 * The counter decides, in either direction: 0 across a boot and an
 		 * install makes the guard a permanent refusal; non-zero means the
 		 * shipping path needs the chunk SPLIT at the page boundary, not
-		 * refused.
+		 * refused.  Each counted crossing is also copied into
+		 * z3660_pagecross_ring (record only), so the addresses behind a
+		 * non-zero count can be read off a running kernel.
 		 */
-		if ((pa & (ulong)(NBPP - 1)) + len > (ulong)NBPP)
+		if ((pa & (ulong)(NBPP - 1)) + len > (ulong)NBPP) {
 			z3660_pagecross_n++;
+			z3660_pcr_note( unit, write, block, len, pa, req, reqlen);
+		}
 
 		if (write) {
 			/*

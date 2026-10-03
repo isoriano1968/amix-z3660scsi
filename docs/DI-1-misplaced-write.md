@@ -292,6 +292,10 @@ the DI-1 session.
 | `z3660_nest_hits` | 0x13d6d0 | 0 |
 | `z3660_lastblock` / `z3660_lastlen` | 0x165c84 / 0x149a5c | last request |
 
+The shipping object has no record of *which* chunk crossed. Driver objects built from source
+after 2026-10-03 add `z3660_pagecross_ring`, one entry per counted crossing (unit, LBA, len, pa,
+request base, R/W, seq). The layout and the decode recipe are in `docs/PAGECROSS-RING.md`.
+
 ## 6. Fix specs (no code in this round)
 
 ### 6.1 Driver defence against a stale register latch (relevant to DI-1)

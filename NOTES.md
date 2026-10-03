@@ -1199,3 +1199,60 @@ W-D7 injector; those are fixed separately.
 `autocon bcopy printf sptalloc`; relink TOTAL complaints 0; scan060 CLEAN (1064 / 1043 lines);
 `%sr` per function unchanged (enter 1/1, leave 1/1, complete 4/4). kerntools re-pin from
 `6c347e25…` needed.
+
+## 2026-10-03: DI-1 page-cross ring — which chunk crossed, not just how many
+
+**Why.** On KD060-Z-CD `z3660_pagecross_n` reads 11 at boot; it reads 0 on KD060-Z. The port
+station predicts these are `getrdb`'s static 512 B RDB buffer in the identity region, which
+would be harmless. kerntools sees three 1024 B fragment reads and one 4096 B read in the
+suspect window. The counter cannot tell these apart from outside.
+
+**What.** Beside the counter increment in `z3660_rw()`, each counted crossing is copied into
+`z3660_pagecross_ring`. This is initialized `.data`: the magic `0x5A504352` "ZPCR", then 16
+entries of 8 big-endian longs. `z3660_pagecross_ring_idx` (COMMON) is the next slot. An entry
+holds, at these byte offsets:
+
+| offset | field | meaning |
+|---|---|---|
+| +0 | seq | `z3660_pagecross_n` after this crossing; 0 = slot unused |
+| +4 | flags | bit 0: W |
+| +8 | unit | piscsi unit |
+| +12 | block | LBA of this chunk |
+| +16 | len | chunk bytes |
+| +20 | pa | chunk physical start |
+| +24 | req | `cp->addr` (physical request base) |
+| +28 | reqlen | request bytes |
+
+Entry i starts at ring + 4 + 32·i. The total is 516 B, and the size is asserted at compile time
+for the kernel. The caller's kernel VA is not visible to the driver: `startio()` `vtop()`s first.
+A `pa` inside the identity-mapped image names a static through the kernel map. The decode
+recipe and a worked example are in `docs/PAGECROSS-RING.md`.
+
+**No behaviour change.** The ring is written, never read. The counter's test and its semantics
+are unchanged. ZS-04 still refuses in `z3660queue()` before `z3660_rw()` runs. The 040
+`z3660_rw` disassembly differs from ZS-04's only by register allocation, the two saved request
+locals and the `jsr z3660_pcr_note` on the crossing branch. The doorbell order is unchanged.
+
+**Evidence.** `make -C test/host check`: **199 passed, 0 failed**, 6/6 parity. The new
+`test_pagecross_ring()` has 15 gates:
+- the magic is present;
+- an in-page READ records nothing;
+- a crossing READ fills every field (seq 1, R, unit 0, LBA 5, 512 B, pa == req) and delivers
+  LBA 5;
+- a crossing WRITE takes slot 1 with W;
+- a 129-block READ from a page-end start records two chunks. The second chunk has LBA 138,
+  512 B and `pa - req` = 65536, and the bytes equal the backing store;
+- 17 crossings wrap idx to 1, slot 0 holds seq 17, and the magic is untouched.
+
+`build/mkobj.sh pcr`:
+- `z3660_040.o`: sha256 `2e3a3d4f…`, sum -r 09293 10, 10084 B;
+- `z3660_030.o`: sha256 `32e3b666…`, sum -r 51856 10, 10080 B;
+- both carry `D z3660_pagecross_ring`, with `5a504352` at `.data`+0xf0, and
+  `C z3660_pagecross_ring_idx`;
+- `nm -u` is still `autocon bcopy printf sptalloc`;
+- relink: TOTAL complaints 0, all page shifts are 12;
+- scan060 CLEAN on both listings (1098 / 1077 decoded lines);
+- `%sr` sites are unchanged (12 in each object).
+
+The shipping KD060-Z object is not changed. kerntools re-cuts the `-CD` sibling for the
+diagnostic boot.

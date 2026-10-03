@@ -1131,6 +1131,140 @@ static void test_f3_cache()
 
 
 /* ====================================================================== */
+/* GATING: the DI-1 page-cross ring records WHICH chunk crossed.          */
+/*                                                                         */
+/* Every crossing z3660_pagecross_n counts is copied into a 16-entry ring  */
+/* (src/z3660.c, layout in NOTES.md / docs/PAGECROSS-RING.md).  These      */
+/* cells force crossings through the real z3660_rw() and assert each       */
+/* field, the wrap, and that the transfer itself is untouched (okay, same  */
+/* bytes as the backing store).  Host ulong is 64-bit, so the BYTE offsets */
+/* are asserted by the kernel-only layout check in the driver, not here.   */
+/* ====================================================================== */
+#define	PCR_N		16
+#define	PCR_MAGIC	0x5A504352UL		/* "ZPCR" */
+struct pcr_ent {
+	unsigned long	seq, flags, unit, block, len, pa, req, reqlen;
+};
+struct pcr_ring {
+	unsigned long	magic;
+	struct pcr_ent	e[PCR_N];
+};
+extern struct pcr_ring	z3660_pagecross_ring;
+extern unsigned long	z3660_pagecross_ring_idx;
+
+static uchar	pcrbuf[65536 + 512 + 4 * F3_NBPP];
+
+static void pcr_zero()
+{
+	memset( z3660_pagecross_ring.e, 0, sizeof z3660_pagecross_ring.e);
+	z3660_pagecross_ring_idx = 0;
+	z3660_pagecross_n = 0;
+}
+
+static void pcr_rw( op, lba, nblk, p)
+int		op;
+unsigned long	lba, nblk;
+uchar		*p;
+{
+	uchar	cdb[10];
+
+	memset( cdb, 0, sizeof cdb);
+	cdb[0] = (uchar)op;
+	cdb[2] = (uchar)(lba >> 24); cdb[3] = (uchar)(lba >> 16);
+	cdb[4] = (uchar)(lba >> 8);  cdb[5] = (uchar)lba;
+	cdb[7] = (uchar)(nblk >> 8); cdb[8] = (uchar)nblk;
+	run_cmd( U_DISK, cdb, 10, p, (unsigned)(nblk * DK_BS));
+}
+
+static void test_pagecross_ring()
+{
+	uchar		*pg, *cross;
+	struct pcr_ent	*e;
+	unsigned long	i;
+	int		same;
+
+	printf("\n=== GATE: DI-1 page-cross ring -- which chunk crossed ===\n");
+
+	CHECK( z3660_pagecross_ring.magic == PCR_MAGIC,
+	       "ring: magic 0x5A504352 \"ZPCR\" at the head (initialized data)");
+
+	z3660_cache = 0;			/* the shipping posture */
+	pg = pcrbuf + ((F3_NBPP - ((unsigned long)pcrbuf & (F3_NBPP - 1))) & (F3_NBPP - 1));
+	cross = pg + F3_NBPP - 64;		/* 64 bytes below a page end */
+
+	/* ---- 1. an in-page chunk leaves the ring alone ---- */
+	pcr_zero();
+	pcr_rw( 0x28, 3UL, 1UL, pg);
+	CHECK( g_okay == TRUE && z3660_pagecross_n == 0 && z3660_pagecross_ring_idx == 0
+	       && z3660_pagecross_ring.e[0].seq == 0,
+	       "ring: an in-page READ records nothing");
+
+	/* ---- 2. a crossing READ: every field ---- */
+	pcr_zero();
+	pcr_rw( 0x28, 5UL, 1UL, cross);
+	e = &z3660_pagecross_ring.e[0];
+	CHECK( g_okay == TRUE && z3660_pagecross_n == 1,
+	       "ring: crossing READ counted and still completes (no behaviour change)");
+	CHECK( be32( cross) == 5UL,
+	       "ring: crossing READ delivered the right block (marker = LBA 5)");
+	CHECK( e->seq == 1 && e->flags == 0 && e->unit == U_DISK && e->block == 5
+	       && e->len == DK_BS,
+	       "ring: READ entry seq 1, flags R, unit, LBA, len");
+	CHECK( e->pa == (unsigned long)cross && e->req == (unsigned long)cross
+	       && e->reqlen == DK_BS,
+	       "ring: READ entry pa == req == cp->addr, reqlen = request bytes");
+	CHECK( z3660_pagecross_ring_idx == 1,
+	       "ring: idx advanced to the next slot");
+	printf("       e0: seq=%lu flags=%lu unit=%lu block=%lu len=%lu pa-off=%lu idx=%lu\n",
+	       e->seq, e->flags, e->unit, e->block, e->len,
+	       e->pa & (F3_NBPP - 1), z3660_pagecross_ring_idx);
+
+	/* ---- 3. a crossing WRITE lands in the next slot with the W flag ---- */
+	pcr_rw( 0x2A, 7UL, 2UL, cross);
+	e = &z3660_pagecross_ring.e[1];
+	CHECK( g_okay == TRUE && z3660_pagecross_n == 2 && e->seq == 2
+	       && e->flags == 1 && e->block == 7 && e->len == 2 * DK_BS
+	       && e->pa == (unsigned long)cross && e->reqlen == 2 * DK_BS,
+	       "ring: crossing WRITE -> slot 1, seq 2, flags W, LBA 7, len 1024");
+
+	/* ---- 4. multi-chunk: the second chunk's pa != req, its LBA advanced ---- */
+	pcr_zero();
+	pcr_rw( 0x28, 10UL, 129UL, cross);	/* 64 KB chunk + one 512 B chunk */
+	CHECK( g_okay == TRUE && z3660_pagecross_n == 2 && z3660_pagecross_ring_idx == 2,
+	       "ring: 129-block READ from a page-end start = two crossing chunks");
+	e = &z3660_pagecross_ring.e[0];
+	CHECK( e->seq == 1 && e->block == 10 && e->len == 65536
+	       && e->pa == (unsigned long)cross && e->req == (unsigned long)cross
+	       && e->reqlen == 129 * DK_BS,
+	       "ring: chunk 1 = LBA 10, 64 KB, pa == req");
+	e = &z3660_pagecross_ring.e[1];
+	CHECK( e->seq == 2 && e->block == 10 + 128 && e->len == DK_BS
+	       && e->pa == (unsigned long)cross + 65536 && e->req == (unsigned long)cross
+	       && e->reqlen == 129 * DK_BS,
+	       "ring: chunk 2 = LBA 138, 512 B, pa - req = 65536 (offset in request)");
+	same = mock_backing( U_DISK) != 0
+	    && memcmp( cross, mock_backing( U_DISK) + 10 * DK_BS, 129 * DK_BS) == 0;
+	CHECK( same,
+	       "ring: the multi-chunk READ delivered the backing store's 129 blocks");
+
+	/* ---- 5. wrap: 17 crossings, slot 0 now holds seq 17 ---- */
+	pcr_zero();
+	for (i = 0; i < PCR_N + 1; ++i)
+		pcr_rw( 0x28, 20UL + i, 1UL, cross);
+	CHECK( z3660_pagecross_n == PCR_N + 1 && z3660_pagecross_ring_idx == 1,
+	       "ring: 17 crossings -> counter 17, idx wrapped to 1");
+	CHECK( z3660_pagecross_ring.e[0].seq == 17 && z3660_pagecross_ring.e[0].block == 36
+	       && z3660_pagecross_ring.e[1].seq == 2 && z3660_pagecross_ring.e[15].seq == 16,
+	       "ring: slot 0 overwritten by seq 17 (LBA 36); slots 1..15 hold seq 2..16");
+	CHECK( z3660_pagecross_ring.magic == PCR_MAGIC,
+	       "ring: the wrap never touches the magic");
+
+	pcr_zero();
+	z3660_cache = 0;
+}
+
+
+/* ====================================================================== */
 /* GATING: ZS-02 detection -- a signature the open bus cannot fake.        */
 /*                                                                         */
 /* Each cell starts from a forgotten board (z3660_test_unmap) and a fresh  */
@@ -1372,6 +1506,7 @@ int main()
 	test_completion_trampoline();
 
 	test_f3_cache();
+	test_pagecross_ring();
 
 	stretch_cd_parity();
 
