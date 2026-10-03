@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-03 — DI-1 instruments: page-cross ring, fault knob, the record (db0d135..3809907)
+
+Diagnostic only, the shipping pin unchanged (e072408): a page-cross ring (bd8d900) recording every request whose buffer
+crosses a 4 KiB page; a fault knob (d78ac7f, REFUSE/SHIFT with a patchable signed shift: SHIFT -4 on piece 3 reproduces
+the DI-1 picture, REFUSE proves the kernel error path clean); the DI-1 record (the kernel's 2 KiB request stream, the
+firmware register-value race as the only sufficient mechanism, the inode block flushed twice per sync with piece 1
+updated).
+
 ## 2026-10-02 — ZS-04: a raw read of a CD unit returns EIO instead of overrunning memory (e072408)
 
 Stock dd.c addresses every unit in 512-byte units (count = b_bcount/512); on a 2048-byte CD unit the driver
