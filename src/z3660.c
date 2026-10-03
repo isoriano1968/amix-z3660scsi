@@ -588,6 +588,44 @@ ulong	block, len, pa, req, reqlen;
 	z3660_pagecross_ring_idx = (z3660_pagecross_ring_idx + 1) & (Z3660_PCR_N - 1);
 }
 
+/*
+ * FAULT KNOB -- DI-1 DIAGNOSTIC CUTS ONLY, NEVER IN A SHIPPING CHAIN.
+ * The emulated Z3660 mailbox is synchronous and cannot fail a transfer, so the
+ * kernel's own error -> retry handling (dd.c's sdintr retry, the completion
+ * order shims) is unreachable on the rig.  These patchable longs let the host
+ * (amiberry WRITE_MEM) or adb -w arm ONE driver-side fault on the next block
+ * WRITE whose starting LBA is z3660_fault_lba (docs/FAULT-KNOB.md):
+ *
+ *   z3660_fault_lba   0 = off, the default: one tstl per READ/WRITE and
+ *                     nothing else.  Else the starting LBA, in the unit's
+ *                     blocks, of the WRITE to fault.  Cleared to 0 when the
+ *                     knob fires: one-shot.
+ *   z3660_fault_mode  0 = REFUSE: complete exactly as a z3660map() failure
+ *                         does (status 0xff, okay FALSE), no transfer, no
+ *                         doorbell.
+ *                     1 = SHIFT: do the WRITE with the block register set to
+ *                         block + z3660_fault_shift, reported GOOD: the payload
+ *                         lands at the wrong LBA, a misplaced piece made at the
+ *                         mailbox.  REFUSE instead if the shifted range would
+ *                         start below 0 or pass the unit end.
+ *                     any other value = REFUSE.
+ *   z3660_fault_n     times the knob fired, in either mode.
+ *   z3660_fault_shift SHIFT's signed offset in blocks, default +4 (2 KiB on a
+ *                     disk).  -4 armed on the third 2 KiB piece of an 8 KiB
+ *                     inode-block write is DI-1's picture
+ *                     (docs/DI-1-misplaced-write.md §4.1).
+ *
+ * Reads, writes starting at any other LBA, CD-ROM writes and every request a
+ * guard below refuses are untouched: the test runs after ZS-04, so it only
+ * ever replaces a transfer that would otherwise have happened.  All four are
+ * explicitly initialized, so gcc 2.7.2.3 places them in .data (not COMMON):
+ * each has a fixed .data offset in the object and file bytes in the kernel.
+ */
+ulong	z3660_fault_lba   = 0;			/* 0 = off; else the WRITE LBA */
+ulong	z3660_fault_mode  = 0;			/* 0 REFUSE, 1 SHIFT           */
+ulong	z3660_fault_n     = 0;			/* times fired                 */
+long	z3660_fault_shift = 4;			/* SHIFT: blocks added, signed */
+
 #ifndef	HOST_TEST
 #define	Z3660_CPUSHL(p)	__asm__ __volatile__( ".word 0xf468" : : "a" (p) : "memory")
 #define	Z3660_CINVL(p)	__asm__ __volatile__( ".word 0xf448" : : "a" (p) : "memory")
@@ -1693,6 +1731,21 @@ struct sdcom	*cp;
 		if (blocks > (ulong)cp->nbyte / bs) {
 			z3660_short_n++;
 			cp->status = 0xff; cp->okay = FALSE;
+			break;
+		}
+		/* DI-1 fault knob, diagnostic cuts only (see z3660_fault_lba) */
+		if (z3660_fault_lba != 0 && write && block == z3660_fault_lba) {
+			long	to;
+
+			z3660_fault_lba = 0;		/* one-shot */
+			z3660_fault_n++;
+			to = (long)block + z3660_fault_shift;
+			if (z3660_fault_mode == 1 && to >= 0
+			    && (ulong)to + blocks <= nb) {
+				z3660_rw( unit, write, (ulong)to, blocks, bs, data);
+				break;
+			}
+			cp->status = 0xff; cp->okay = FALSE;	/* as a map failure */
 			break;
 		}
 		z3660_rw( unit, write, block, blocks, bs, data);

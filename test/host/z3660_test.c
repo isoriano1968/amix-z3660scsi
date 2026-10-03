@@ -1265,6 +1265,145 @@ static void test_pagecross_ring()
 
 
 /* ====================================================================== */
+/* GATING: the DI-1 fault knob (diagnostic cuts only, never shipped).      */
+/*                                                                         */
+/* z3660_fault_lba != 0 arms ONE fault on the next block WRITE starting at */
+/* that LBA: mode 0 refuses it as a z3660map() failure does (0xff, okay    */
+/* FALSE, no doorbell), mode 1 writes it at LBA + 4 and reports GOOD.      */
+/* Either way the knob disarms itself and z3660_fault_n counts it.  Reads, */
+/* other LBAs and the knob at 0 must behave exactly as before.             */
+/* ====================================================================== */
+extern unsigned long	z3660_fault_lba, z3660_fault_mode, z3660_fault_n;
+extern long		z3660_fault_shift;
+
+static void fk_fill( p, n, v)
+uchar		*p;
+unsigned long	n;
+int		v;
+{
+	unsigned long	i;
+
+	for (i = 0; i < n; i++)
+		p[i] = (uchar)(v + (i & 0x3F));
+}
+
+static void test_fault_knob()
+{
+	uchar		buf[4 * 512], pa[4 * 512], pb[4 * 512], pc[4 * 512], old[8 * 512];
+	unsigned char	*back = mock_backing( U_DISK);
+	unsigned long	db;
+
+	printf("\n=== GATE: DI-1 fault knob -- one-shot refuse / shift on a WRITE ===\n");
+	z3660_cache = 0;
+	fk_fill( pa, sizeof pa, 0x10);
+	fk_fill( pb, sizeof pb, 0x50);
+	fk_fill( pc, sizeof pc, 0x90);
+
+	CHECK( z3660_fault_lba == 0 && z3660_fault_mode == 0 && z3660_fault_n == 0
+	       && z3660_fault_shift == 4,
+	       "knob: boots disarmed (lba 0, mode 0, n 0), SHIFT offset +4");
+
+	/* ---- 1. REFUSE: the armed WRITE fails like a map failure, nothing moves ---- */
+	z3660_fault_lba = 68; z3660_fault_mode = 0;
+	memcpy( old, back + 68 * DK_BS, 4 * DK_BS);
+	db = mock_doorbells[U_DISK];
+	pcr_rw( 0x2A, 68UL, 4UL, pa);
+	printf("       refuse: status=0x%02X okay=%d doorbells=+%lu n=%lu lba=%lu\n",
+	       g_status, g_okay, mock_doorbells[U_DISK] - db, z3660_fault_n, z3660_fault_lba);
+	CHECK( !g_okay && g_status == 0xff,
+	       "knob REFUSE: the armed WRITE completes status 0xFF, okay FALSE");
+	CHECK( mock_doorbells[U_DISK] == db && memcmp( back + 68 * DK_BS, old, 4 * DK_BS) == 0,
+	       "knob REFUSE: no doorbell, the medium is untouched");
+	CHECK( z3660_fault_n == 1 && z3660_fault_lba == 0,
+	       "knob REFUSE: counted (n 1) and disarmed (lba 0)");
+
+	/* ---- 2. one-shot: the retry of the same WRITE succeeds ---- */
+	pcr_rw( 0x2A, 68UL, 4UL, pa);
+	CHECK( g_okay && g_status == 0 && mock_doorbells[U_DISK] == db + 1
+	       && memcmp( back + 68 * DK_BS, pa, 4 * DK_BS) == 0,
+	       "knob one-shot: the same WRITE again lands at LBA 68, GOOD, one doorbell");
+	CHECK( z3660_fault_n == 1, "knob one-shot: the retry is not counted");
+
+	/* ---- 3. armed, but not this request: reads, other starts, a covering write ---- */
+	z3660_fault_lba = 72;
+	memset( buf, 0, sizeof buf);
+	pcr_rw( 0x28, 72UL, 4UL, buf);
+	CHECK( g_okay && g_status == 0 && memcmp( buf, back + 72 * DK_BS, 4 * DK_BS) == 0
+	       && z3660_fault_lba == 72 && z3660_fault_n == 1,
+	       "knob: a READ of the armed LBA reads normally and leaves the knob armed");
+	pcr_rw( 0x2A, 76UL, 4UL, pb);
+	CHECK( g_okay && memcmp( back + 76 * DK_BS, pb, 4 * DK_BS) == 0
+	       && z3660_fault_lba == 72 && z3660_fault_n == 1,
+	       "knob: a WRITE starting at another LBA is untouched");
+	pcr_rw( 0x2A, 70UL, 4UL, pc);		/* covers 72, starts at 70 */
+	CHECK( g_okay && memcmp( back + 70 * DK_BS, pc, 4 * DK_BS) == 0
+	       && z3660_fault_lba == 72 && z3660_fault_n == 1,
+	       "knob: a WRITE covering the LBA but starting before it is untouched");
+	pcr_rw( 0x2A, 72UL, 4UL, pa);
+	CHECK( !g_okay && g_status == 0xff && z3660_fault_n == 2 && z3660_fault_lba == 0
+	       && memcmp( back + 72 * DK_BS, pc + 2 * DK_BS, 2 * DK_BS) == 0,
+	       "knob: the WRITE starting at the LBA fires (n 2), the medium keeps LBA 70's data");
+
+	/* ---- 4. SHIFT: the payload lands at LBA + 4, once, reported GOOD ---- */
+	z3660_fault_lba = 80; z3660_fault_mode = 1;
+	memcpy( old, back + 80 * DK_BS, 8 * DK_BS);
+	db = mock_doorbells[U_DISK];
+	pcr_rw( 0x2A, 80UL, 4UL, pb);
+	printf("       shift: status=0x%02X okay=%d doorbells=+%lu n=%lu lba=%lu\n",
+	       g_status, g_okay, mock_doorbells[U_DISK] - db, z3660_fault_n, z3660_fault_lba);
+	CHECK( g_okay && g_status == 0 && mock_doorbells[U_DISK] == db + 1,
+	       "knob SHIFT: the armed WRITE is performed once and reported GOOD");
+	CHECK( memcmp( back + 84 * DK_BS, pb, 4 * DK_BS) == 0
+	       && memcmp( back + 80 * DK_BS, old, 4 * DK_BS) == 0,
+	       "knob SHIFT: the payload is at LBA 84 (block + 4); LBA 80..83 untouched");
+	CHECK( z3660_fault_n == 3 && z3660_fault_lba == 0,
+	       "knob SHIFT: counted (n 3) and disarmed (lba 0)");
+	pcr_rw( 0x2A, 80UL, 4UL, pc);
+	CHECK( g_okay && memcmp( back + 80 * DK_BS, pc, 4 * DK_BS) == 0
+	       && memcmp( back + 84 * DK_BS, pb, 4 * DK_BS) == 0 && z3660_fault_n == 3,
+	       "knob SHIFT one-shot: the next WRITE lands at LBA 80; LBA 84 keeps the shifted piece");
+
+	/* ---- 5. SHIFT past the unit end refuses instead ---- */
+	z3660_fault_lba = DK_NBLK - 4;
+	db = mock_doorbells[U_DISK];
+	pcr_rw( 0x2A, DK_NBLK - 4, 4UL, pa);
+	CHECK( !g_okay && g_status == 0xff && mock_doorbells[U_DISK] == db
+	       && z3660_fault_n == 4 && z3660_fault_lba == 0,
+	       "knob SHIFT at the last 4 blocks: refused, no doorbell, counted, disarmed");
+
+	/* ---- 6. SHIFT -4 on the third 2 KiB piece of an 8 KiB write: DI-1's picture ---- */
+	{
+		uchar	pz[4][4 * 512], o96[4 * 512];
+		int	k;
+
+		for (k = 0; k < 4; k++)
+			fk_fill( pz[k], sizeof pz[k], 0x20 + 0x30 * k);
+		memcpy( o96, back + 96 * DK_BS, 4 * DK_BS);
+		z3660_fault_lba = 96; z3660_fault_mode = 1; z3660_fault_shift = -4;
+		for (k = 0; k < 4; k++)		/* buf_breakup's four requests, in order */
+			pcr_rw( 0x2A, 88UL + 4 * k, 4UL, pz[k]);
+		CHECK( g_okay && z3660_fault_n == 5 && z3660_fault_lba == 0,
+		       "knob SHIFT -4: the four pieces all complete GOOD, the knob fired once");
+		CHECK( memcmp( back + 88 * DK_BS, pz[0], 4 * DK_BS) == 0
+		       && memcmp( back + 92 * DK_BS, pz[2], 4 * DK_BS) == 0
+		       && memcmp( back + 96 * DK_BS, o96, 4 * DK_BS) == 0
+		       && memcmp( back + 100 * DK_BS, pz[3], 4 * DK_BS) == 0,
+		       "knob SHIFT -4: +2048 holds piece 3's bytes, +4096 keeps its old bytes (DI-1)");
+	}
+
+	/* ---- 7. a shift that would start below LBA 0 refuses instead ---- */
+	z3660_fault_lba = 2;			/* shift is still -4 */
+	db = mock_doorbells[U_DISK];
+	pcr_rw( 0x2A, 2UL, 4UL, pa);
+	CHECK( !g_okay && g_status == 0xff && mock_doorbells[U_DISK] == db
+	       && z3660_fault_n == 6 && z3660_fault_lba == 0,
+	       "knob SHIFT below LBA 0: refused, no doorbell, counted, disarmed");
+
+	z3660_fault_lba = 0; z3660_fault_mode = 0; z3660_fault_shift = 4;
+}
+
+
+/* ====================================================================== */
 /* GATING: ZS-02 detection -- a signature the open bus cannot fake.        */
 /*                                                                         */
 /* Each cell starts from a forgotten board (z3660_test_unmap) and a fresh  */
@@ -1507,6 +1646,7 @@ int main()
 
 	test_f3_cache();
 	test_pagecross_ring();
+	test_fault_knob();
 
 	stretch_cd_parity();
 

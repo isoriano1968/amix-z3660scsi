@@ -620,3 +620,6 @@ the A4000D's as-shipped arm (§8.4) tell them apart.
 - §6.2: the ring was added (bd8d900). The issuer-side `gen_strategy` test is not a 1.0 item
   (§8.3).
 - **No driver change is owed for DI-1 as of this evening.**
+- **Diagnostic only, added later on 10-03:** a driver-side fault knob for the rig's
+  kernel-retry cells (REFUSE, or SHIFT the block register; −4 on the 3rd piece gives the §2.2
+  picture). See `docs/FAULT-KNOB.md`. It is not a DI-1 fix and never ships.

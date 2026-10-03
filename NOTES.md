@@ -1256,3 +1256,70 @@ locals and the `jsr z3660_pcr_note` on the crossing branch. The doorbell order i
 
 The shipping KD060-Z object is not changed. kerntools re-cuts the `-CD` sibling for the
 diagnostic boot.
+
+## 2026-10-03: DI-1 fault knob — one driver-side WRITE fault, diagnostic cuts only
+
+**Diagnostic cuts only — never in a shipping chain.** The emulated mailbox cannot fail a
+transfer, so the kernel's error → retry path (dd.c `sdintr` retry, the completion-order shims)
+never runs on the rig. kerntools has a cell ready that needs one forced fault: a tagged
+inode-block rewrite with the 2nd 2 KiB piece faulted.
+
+**What.** Four patchable, initialized `.data` longs. `z3660_fault_lba` (0 = off) arms one fault
+on the next block WRITE whose **starting** LBA equals it. The check sits in `z3660queue()` after
+ZS-04, just before `z3660_rw()`. When it fires, the driver clears `z3660_fault_lba` (one-shot)
+and increments `z3660_fault_n`. Then:
+- `z3660_fault_mode` 0 (or anything but 1), REFUSE: it completes as a `z3660map()` failure does
+  (status 0xff, okay FALSE), with no transfer and no doorbell;
+- mode 1, SHIFT: it does the WRITE with the block register at `block + z3660_fault_shift`,
+  default +4, and reports GOOD. If the shifted range would start below 0 or pass the unit end,
+  it REFUSEs instead.
+
+Reads, other start LBAs, CD writes and all earlier refusals are untouched. There is no unit
+filter. The symbols, offsets, the arming recipe (amiberry `WRITE_MEM`, in-guest `adb -w` +
+kmemdump) and the picture each setting gives are in `docs/FAULT-KNOB.md`.
+
+**One addition to the brief: `z3660_fault_shift`.** The brief's SHIFT is a fixed +4. Armed on
+the 2nd piece, +4 sends piece 2's payload to L+8, and piece 3 then overwrites it. The disk ends
+up with L+4 holding its old bytes, a lost piece. DI-1's picture is the opposite direction:
+piece 3's bytes at L+4 and L+8 old, the stale `WRITE_ADDR1` row of DI-1 §4.1. That needs −4
+armed on the 3rd piece. So the offset is a patchable signed long, initialized to 4. The
+default is exactly the brief, and −4 needs no rebuild.
+
+**Evidence.**
+- `make -C test/host check`: **217 passed, 0 failed**, 6/6 parity (was 199). The new
+  `test_fault_knob()` has 18 gates:
+  - it starts disarmed;
+  - REFUSE gives 0xFF / okay FALSE, no doorbell, the medium untouched, n 1, lba 0;
+  - the retry of the same WRITE lands, with one doorbell, and is not counted;
+  - with the knob armed, a READ of the LBA, a WRITE at another LBA and a WRITE covering it from
+    LBA 70 are untouched;
+  - SHIFT +4 lands the payload at LBA 84 once, with 80..83 untouched, and the next WRITE lands
+    at 80;
+  - SHIFT at the unit's last 4 blocks and SHIFT below LBA 0 refuse, without a doorbell;
+  - SHIFT −4 on the 3rd of four 2 KiB pieces leaves +2048 = piece 3 and +4096 = old bytes.
+- **Negative controls**: seven mutants of the knob, each built into the same harness, and each
+  caught by the knob gates only:
+  - no one-shot clear: 12 fail;
+  - SHIFT ignored: 4;
+  - reads also fire: 4;
+  - knob compiled out: 16;
+  - no end-of-unit guard: 1;
+  - no below-0 guard: 1;
+  - a fixed +4 instead of the patchable shift: 2.
+
+  The 199 pre-existing gates pass in every mutant.
+- `build/mkobj.sh fk`:
+  - `z3660_040.o`: sha256 `9361a1e7…`, sum -r 16771 11, 10388 B;
+  - `z3660_030.o`: sha256 `311d3336…`, sum -r 55567 11, 10384 B;
+  - both have `D z3660_fault_lba/mode/n/shift` at `.data`+0x2f4/0x2f8/0x2fc/0x300 (= ring +
+    0x204…0x210), with init bytes 0/0/0/4;
+  - `nm -u` is still `autocon bcopy printf sptalloc`;
+  - relink: TOTAL complaints 0, all page shifts are 12;
+  - scan060 CLEAN on both listings (1121 / 1100 decoded lines);
+  - `%sr` sites are unchanged (12 in each object);
+  - code changed only in `z3660queue()`. Every other function is instruction-identical to
+    `obj-pcr`, and some differ only in `.data` relocation addends (+0x10). In the off state
+    the cost is `tstl z3660_fault_lba; beq`. The REFUSE arm shares the ZS-04/range refusal
+    tail.
+
+Nothing ships. kerntools cuts the diagnostic sibling from this source.
