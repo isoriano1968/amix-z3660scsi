@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-13 — Publication scrub before the first push since August (40da0e8)
+
+README and a new root NOTICE carry the Amiga Corporation trademark wording. Internal report ids, scratch paths and
+process wording in DI-1, NOTES, BLIZZARD-F3 and two z3660.c comments made generic; driver code unchanged.
+
 ## 2026-10-03 — DI-1 instruments: page-cross ring, fault knob, the record (db0d135..3809907)
 
 Diagnostic only, the shipping pin unchanged (e072408): a page-cross ring (bd8d900) recording every request whose buffer
