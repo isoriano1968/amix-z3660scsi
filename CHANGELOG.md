@@ -20,7 +20,7 @@ the doorbell and counts it in z3660_short_n; cdfs and disk requests pass unchang
 
 z3660map() decides AGA by the low nibble of the VPOSR id (>= 2) instead of id >= 0x22, so NTSC ECS (0x30) is refused before the fixed window is touched. Found in the review of the contributed amix-gayle-ide driver (Emre Bastuz). Harness 169/0. Objects: z3660_040.o 277a5b53 (sum 58774), z3660_030.o b5946c83.
 
-## 2026-09-27 — T-9 rebuild: spl masks and MMIO volatile restored; truthful console (18e7eb2, 16ca1a8)
+## 2026-09-27 — Rebuild: spl masks and MMIO volatile restored; truthful console (18e7eb2, 16ca1a8)
 
 With gcc-cross-amix 7a1d727 the objects keep their spl masks again: z3660_leave restores the IPL and
 z3660_complete's FIFO/`completing` guard is masked (4 SR writes, was 0); the VPOSR gate is a word read
@@ -38,7 +38,7 @@ mailbox attaches with its unit sweep deferred (no phantom "no drive mapped" line
 6/6 parity; driver-line object 55e37689 scan060 CLEAN. Docs: completions are synchronous through the
 driver FIFO (not timeout()); amiberry does model a 040/060 copyback cache (AB-03), the coherence verdict
 stays metal-only; the sptalloc arm's mapping is CM=00 writethrough-cacheable; the autocon table is
-unreliable only on the stock 030 boot2 (T-7); README status.
+unreliable only on the stock 030 boot2; README status.
 
 ## 2026-09-26 — stock-firmware hardening: units with a bad block size are skipped (70f54b6)
 

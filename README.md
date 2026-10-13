@@ -145,3 +145,11 @@ the kerntools harness from `driver.conf`, so they are **not** shipped here. See
 The Z3660 piscsi mailbox protocol that `z3660.c` implements is defined by the
 open-source [`shanshe/Z3660`](https://github.com/shanshe/Z3660) firmware
 (`z3660-drivers/scsi/`); credit for the protocol is theirs.
+
+The wording Amiga Corporation asked us to carry:
+
+This project and its developers are not affiliated with, endorsed by, or sponsored by
+Amiga Corporation. Amiga is a registered trademark of Amiga Corporation.
+
+AmigaOS and Amiga UNIX are trademarks of their respective owners, and UNIX is a
+registered trademark of The Open Group. See [`NOTICE`](NOTICE).

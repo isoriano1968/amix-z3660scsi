@@ -546,8 +546,8 @@ mapping arms are **not** alike on 040/060:
   *Correction 2026-09-27:* the verdict stands, the reason did not. `hat_cm_ram` applies to managed
   pages only. An unmanaged device page mapped for a user (`hat_devload`) goes to `Lcm_dev`: NCS
   unconditionally on r13 / candidate-2 / candidate-3 (no `hat_cm_fb` table there), NCS on the
-  driver-line base unless a registered framebuffer range makes it NC (workspace
-  `tmp/2026-09-27-po05-prep/HAT-CM-FB-R13.md`). This arm is a *kernel* mapping and never reaches
+  driver-line base unless a registered framebuffer range makes it NC (bench evidence, not
+  published). This arm is a *kernel* mapping and never reaches
   `Lcm_sel`: `sptalloc()` ignores its mode and `segkmem_mapin` copies a `CM=00` template, i.e.
   **writethrough-cacheable** (port `src/devkvmap040.s` header, `src/segkmem040.s` B1 note). Still a
   cacheable mailbox, so still unsupported; the remedy is an NCS `dev_kvmap`, as Antti's va2000 does.
@@ -883,8 +883,8 @@ a zero counter counts as failed — is still **owed**, and the bench structurall
 emulator models no 040/060 copyback data cache.
 *Correction 2026-09-27:* that last clause is wrong. amiberry **does** model a 040/060 copyback data
 cache (per-longword dirty bits, eviction push), live only with `cpu_compatible=true`, `cachesize=0`
-and `cpu_data_cache=true`; device DMA bypasses it (workspace
-`tmp/2026-09-27-k0-dispatches/AB-03-report.md`). So an emulator cell with the cache kept live *can*
+and `cpu_data_cache=true`; device DMA bypasses it (bench evidence,
+not published). So an emulator cell with the cache kept live *can*
 show a missing CPUSH or a missing CINV. The current bench configs keep it off, and the coherence
 **verdict** stays metal-only (D-1 D42).
 
@@ -990,8 +990,8 @@ autoconfigured at `0x40000000`, i.e. the `sptalloc` arm), every boot of candidat
 prints `z3660: sptalloc mapping arm is unsupported with a live data cache`, then `z3660:
 cache-inhibit assertion FAILED (cache=60 cacr 0x80008000)`, then `z3660: unit N: no drive mapped,
 skipped` for **all eight** units. Unit 6 still roots the box and moves data equal to host truth
-(workspace `review/T-5`). **On metal none of this appears**: the board sits at `0x10000000`, the
-direct arm is used, and only the unmapped units are named (MD-3a on the A4000T, `review/T-7`).
+(internal bench report). **On metal none of this appears**: the board sits at `0x10000000`, the
+direct arm is used, and only the unmapped units are named (MD-3a on the A4000T, internal bench report).
 
 **Reading, line by line.**
 
@@ -1026,7 +1026,7 @@ there, so a z3660scsi-carrying kernel would claim a board, sweep eight phantom u
 **Decision order** (`z3660map()`):
 
 1. **ConfigDev first.** `autocon(0x144B0001)`: the board's own AutoConfig entry. This is the
-   metal-proven path on the 040/060 line (boot2-040 hands the entry over, `review/T-7`), where the
+   metal-proven path on the 040/060 line (boot2-040 hands the entry over, internal bench report), where the
    glue registers the card only through `sd.c`'s autocon loop. AutoConfig has already proved a
    Z3660 is present, so a mailbox that does not answer the signature *yet* does not un-find it:
    the board attaches, the unit sweep is deferred with one console line, and every later command
@@ -1087,9 +1087,9 @@ more trips (the old DRVTYPE probe was 2). On the emulator's `sptalloc` arm the e
 owed; neither was run here. The fork firmware prints nothing for these accesses; stock is read
 from source only.
 
-## 2026-09-27: T-9 rebuild — spl masks and MMIO `volatile` restored in the objects
+## 2026-09-27: Rebuild — spl masks and MMIO `volatile` restored in the objects
 
-**Cause (workspace `review/T-9`).** `AMIX_KERNEL_CFLAGS` carries `-traditional`, which turns off
+**Cause (internal bench report).** `AMIX_KERNEL_CFLAGS` carries `-traditional`, which turns off
 `__STDC__`, so the stock `sys/types.h` did `#define volatile` (empty). The GNU spl primitives in
 `sys/inline.h` then became plain output asms, and gcc deleted every one whose result was unused.
 In `z3660_040.o`/`z3660_030.o` only the `spl6()` in `z3660_enter()` survived (its value escapes):
@@ -1138,7 +1138,7 @@ header's meaning: `spl6` = `_spl4` (`mov.w &0x2400,%sr`, returns the prior SR as
 cells observe. `make -C test/host check`: 155 passed, 0 failed; 6/6 parity.
 
 **Pin.** kerntools re-pins the z3660 object from `55e37689…` to the new sha256; DL-00/DL-08/DL-13,
-MD-3a and MG1–MG3 have to be re-run on it (T-9 item 4). Not run here.
+MD-3a and MG1–MG3 have to be re-run on it. Not run here.
 
 ## 2026-09-27: A1 — console lines that stay true on the sptalloc arm
 
@@ -1175,7 +1175,7 @@ skipped units, answers later with block 2's data, leaves the mask (`0xBE` → `0
 once; a failing `sptalloc()` (new mock knob) refuses the probe with no mailbox access, a later
 command retries and fails with no doorbell, and the line prints once for two failures.
 **Negative control:** the same tests against `18e7eb2` fail 4. Cross-built via `build/mkobj.sh`
-with the T-9 flags: `z3660_040.o` sha256 `6c347e25…`, sum -r 10405 9, 9184 B; `z3660_030.o`
+with the corrected flags: `z3660_040.o` sha256 `6c347e25…`, sum -r 10405 9, 9184 B; `z3660_030.o`
 `ca2ef1cb…`, sum -r 37158 9, 9180 B; `nm -u` still `autocon bcopy printf sptalloc`; relink
 TOTAL complaints 0; scan060 CLEAN (1064 / 1043 lines); `%sr` per function unchanged (enter 1/1,
 leave 1/1, complete 4/4).
@@ -1202,8 +1202,8 @@ W-D7 injector; those are fixed separately.
 
 ## 2026-10-03: DI-1 page-cross ring — which chunk crossed, not just how many
 
-**Why.** On KD060-Z-CD `z3660_pagecross_n` reads 11 at boot; it reads 0 on KD060-Z. The port
-station predicts these are `getrdb`'s static 512 B RDB buffer in the identity region, which
+**Why.** On KD060-Z-CD `z3660_pagecross_n` reads 11 at boot; it reads 0 on KD060-Z. The 040/060
+port predicts these are `getrdb`'s static 512 B RDB buffer in the identity region, which
 would be harmless. kerntools sees three 1024 B fragment reads and one 4096 B read in the
 suspect window. The counter cannot tell these apart from outside.
 

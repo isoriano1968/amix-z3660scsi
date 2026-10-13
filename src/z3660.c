@@ -14,8 +14,8 @@
  * the stock 030 boot2 only: boot2-040 hands the Z3660's ConfigDev over on metal
  * (amix-z3660rtg, A4000D, 2026-09-18), and the 2026-09-27 MD-3a run on a real
  * 68060 attached autocon-first -- the 040/060 line registers this card only via
- * sd.c's autocon() loop, so rooting on it proves the hand-over (workspace
- * review/T-7).  So detection
+ * sd.c's autocon() loop, so rooting on it proves the hand-over (internal
+ * bench report).  So detection
  * is multi-method, like the Hydra driver: try autocon() first, then -- only on
  * an AGA machine (VPOSR >= 0x22; the ECS build box must never touch it) -- probe
  * the fixed base directly.  Either way the mailbox must answer a signature the
@@ -900,7 +900,7 @@ int	leave;
  *   for a USER (hat_devload) gets Lcm_dev, unconditionally NCS on the r13 /
  *   candidate-2 / candidate-3 kernels, which have no hat_cm_fb table, and NCS on
  *   the driver-line base unless a registered framebuffer range makes it NC
- *   (workspace tmp/2026-09-27-po05-prep/HAT-CM-FB-R13.md).  But this arm is a
+ *   (bench evidence, not published).  But this arm is a
  *   KERNEL mapping that never reaches Lcm_sel: sptalloc() ignores its mode and
  *   segkmem_mapin copies a CM=00 template, i.e. WRITETHROUGH CACHEABLE (port
  *   src/devkvmap040.s header).  A cacheable mailbox is still a broken one, so
